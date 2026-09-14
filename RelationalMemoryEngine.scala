@@ -55,7 +55,7 @@ class RME(params: RelMemParams)(implicit p: Parameters) extends LazyModule
       -> This required modifications to the device tree generation. See RocketChip fork
     */
     ResourceBinding {
-      Resource(device, "reserved").bind(ResourceAddress(addr, rocketchip.resources.ResourcePermissions(true, true, false, false, true)))
+      Resource(device, "reserved").bind(ResourceAddress(addr, rocketchip.resources.ResourcePermissions(true, true, true, false, true)))
     }
 
     
@@ -444,7 +444,7 @@ class RME(params: RelMemParams)(implicit p: Parameters) extends LazyModule
         Fetch Unit broadcast 
       */
       // route back through RME for processing if fetch unit holds same source ID as the reply from DRAM
-      val replySelectorCond = out.d.bits.source >= (outMaxID - params.nFetchUnits).U
+      val replySelectorCond = out.d.bits.source > (outMaxID - params.nFetchUnits).U
 
       replyFromDRAMDemux.io.sel := replySelectorCond // if any conditions are true, broadcast to fetch units
       replyFromDRAMDemux.io.outB.ready := false.B // default 
@@ -576,7 +576,7 @@ class RME(params: RelMemParams)(implicit p: Parameters) extends LazyModule
 
 
       // LLC Port
-      io.DTU_DirectoryIOIn.valid := selectedRequestor.valid
+      io.DTU_DirectoryIOIn.valid := selectedRequestor.fire
       io.DTU_DirectoryIOIn.bits := selectedRequestor.bits.descriptor.addr
       fetch_unit.io.IncomingReqInCache := io.DTU_DirectoryIOOut.valid && io.DTU_DirectoryIOOut.bits
       val (toLLC, toLLCEdge) = toLLCNode.out(0)
@@ -584,7 +584,7 @@ class RME(params: RelMemParams)(implicit p: Parameters) extends LazyModule
       fetch_unit.io.LLCInReply <> toLLC.d
       when (toLLC.a.fire)
       {
-        SynthesizePrintf("TO LLC FROM MAIN addr 0x%x SRC=%d\n", toLLC.a.bits.address, toLLC.a.bits.source)
+        //SynthesizePrintf("TO LLC FROM MAIN addr 0x%x SRC=%d\n", toLLC.a.bits.address, toLLC.a.bits.source)
       }
 
       println("DTU toLLC managers:")

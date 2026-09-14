@@ -152,7 +152,7 @@ class FetchUnitRME(params: RelMemParams, adapter: TLAdapterNode, cachedRegionEdg
 
         def GetCoalesceVec(incomingDesc: RequestDescriptor) : Vec[Bool] = {
             VecInit(requestTable.zipWithIndex.map{ case (entry,i) =>
-                (entry.descriptor.addr === incomingDesc.addr) && (incomingDesc.dst.asUInt === 0.U) && (entry.descriptor.baseID === incomingDesc.baseID)
+                (entry.descriptor.addr === incomingDesc.addr) && (incomingDesc.dst.asUInt === 0.U) && (entry.descriptor.baseID === incomingDesc.baseID) && !(receivingEntry === i.U && dataRegFull) && !(receivingEntry2 === i.U && dataReg2Full)
             })
         }
 
@@ -256,24 +256,25 @@ class FetchUnitRME(params: RelMemParams, adapter: TLAdapterNode, cachedRegionEdg
         hasOutReqToCache := false.B
 
 
-
+        val firstWaitCycle = RegInit(false.B)
         assert((math.pow(2, toCacheTLParams.sourceBits)) >= params.nFetchUnits) // otherwise we would use source IDs larger than we can accomodate
         when (io.Requestor.fire)
         {
-            SynthesizePrintf("incoming 0x%x -- dst %d coalesce %d  baseID %d\n", io.Requestor.bits.descriptor.addr, io.Requestor.bits.descriptor.dst.asUInt, can_coalesce, io.Requestor.bits.descriptor.baseID)
+            //SynthesizePrintf("incoming 0x%x -- dst %d coalesce %d  baseID %d\n", io.Requestor.bits.descriptor.addr, io.Requestor.bits.descriptor.dst.asUInt, can_coalesce, io.Requestor.bits.descriptor.baseID)
             when (!can_coalesce)
             {
                 //SynthesizePrintf("No Coalesce 0x%x, Allocate entry %d DescState %d BaseID %d\n", io.Requestor.bits.descriptor.addr, alloc_entry, requestTable(alloc_entry).active, io.Requestor.bits.descriptor.baseID)
                 AllocateEntry(alloc_entry, io.Requestor.bits)
-                hasOutReqToSend := !io.LLCOutReq.fire && !io.OutReq.fire
-                hasOutReqToCache := io.IncomingReqInCache && !io.LLCOutReq.fire
-                io.OutReq.valid := !io.IncomingReqInCache
+                hasOutReqToSend := true.B //!io.LLCOutReq.fire && !io.OutReq.fire
+                //hasOutReqToCache := false.B //io.IncomingReqInCache && !io.LLCOutReq.fire
+                io.OutReq.valid := false.B //!io.IncomingReqInCache
                 outReqEntryToSend := alloc_entry
                 val src = outMaxID.U-alloc_entry
                 io.OutReq.bits := DescriptorToOutReq(io.Requestor.bits.descriptor, src)
+                firstWaitCycle := true.B
 
                 io.LLCOutReq.bits := DescriptorToCacheReq(io.Requestor.bits.descriptor, alloc_entry)
-                io.LLCOutReq.valid := io.IncomingReqInCache
+                io.LLCOutReq.valid :=false.B // io.IncomingReqInCache
 
                 when (io.OutReq.fire) {
                  //   SynthesizePrintf("[FetchUnit] io.OutReq.fire baseReq %d\n", io.Requestor.bits.descriptor.baseID)
@@ -305,10 +306,15 @@ class FetchUnitRME(params: RelMemParams, adapter: TLAdapterNode, cachedRegionEdg
             val src = outMaxID.U-outReqEntryToSend
             outReq := DescriptorToOutReq(requestTable(outReqEntryToSend).descriptor, src)
             outReqToCache := DescriptorToCacheReq(requestTable(outReqEntryToSend).descriptor, outReqEntryToSend)
-            io.OutReq.valid := hasOutReqToSend && !hasOutReqToCache
+
+            val ReqIsToCache = Mux(firstWaitCycle, io.IncomingReqInCache, hasOutReqToCache) 
+            hasOutReqToCache := Mux(firstWaitCycle, Mux((io.OutReq.fire || io.LLCOutReq.fire), false.B, ReqIsToCache), ReqIsToCache && (!io.OutReq.fire && !io.LLCOutReq.fire))
+            firstWaitCycle := false.B
+
+            io.OutReq.valid := hasOutReqToSend && !ReqIsToCache
             io.OutReq.bits := outReq
 
-            io.LLCOutReq.valid := hasOutReqToSend && hasOutReqToCache
+            io.LLCOutReq.valid := hasOutReqToSend && ReqIsToCache
             io.LLCOutReq.bits := outReqToCache
 
 
@@ -357,7 +363,7 @@ class FetchUnitRME(params: RelMemParams, adapter: TLAdapterNode, cachedRegionEdg
         io.LLCInReply.ready := !dataReg2Full 
 
         when (io.inReply.fire) {
-            SynthesizePrintf("[FetchUnit]: inReply.firesrc %d (%d,%d,%d) dataRegfull %d\n", io.inReply.bits.source, d_first_cache, d_last_cache, d_done_cache, dataReg2Full)
+           // SynthesizePrintf("[FetchUnit]: inReply.firesrc %d (%d,%d,%d) dataRegfull %d\n", io.inReply.bits.source, d_first_cache, d_last_cache, d_done_cache, dataReg2Full)
         }
         when (d_first && io.inReply.fire) {
             receivingEntry  := outMaxID.U - io.inReply.bits.source
@@ -433,10 +439,10 @@ class FetchUnitRME(params: RelMemParams, adapter: TLAdapterNode, cachedRegionEdg
 
 
 
-        when (io.LLCInReply.valid)
-        {
-            SynthesizePrintf("(FetchUnit) FROM LLC VALID\n")
-        }
+        //when (io.LLCInReply.valid)
+        //{
+        //    //SynthesizePrintf("(FetchUnit) FROM LLC VALID\n")
+        //}
 
 
         when (io.ControlUnit.fire || io.Prefetch.ToPre.fire)
