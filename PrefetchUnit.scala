@@ -144,6 +144,7 @@ case class PrefetchUnitAGUIO(params: RelMemParams) extends Bundle {
     val Injection = Valid(Output(UInt(32.W)))
     val config_StreamPhysRegisters = Input(Vec(1, UInt(64.W)))
     val config_StreamDataSize = Input(UInt(32.W))
+    val rst = Input(Bool())
 }
 
 
@@ -240,6 +241,12 @@ class PreFetchUnitRME(params: RelMemParams, tlInEdge : TLEdge, tlOutEdge: TLEdge
 
     (matches.reduce(_ || _), PriorityEncoder(matches))
   }
+
+
+
+
+
+
 
     val OldestInjectionPacket = RegInit(0.U(log2Ceil(depthAhead*2).W))
     def IncOldestInjectionPacket() : Unit = {
@@ -447,4 +454,9 @@ class PreFetchUnitRME(params: RelMemParams, tlInEdge : TLEdge, tlOutEdge: TLEdge
     }
 
 
+    when (io.Requestor.rst) {
+      for (i <- 0 until nInjectionPackets) {
+        injectionPacketsValid(i) := false.B
+      }
+    }
 }

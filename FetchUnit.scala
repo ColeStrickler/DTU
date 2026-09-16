@@ -152,7 +152,7 @@ class FetchUnitRME(params: RelMemParams, adapter: TLAdapterNode, cachedRegionEdg
 
         def GetCoalesceVec(incomingDesc: RequestDescriptor) : Vec[Bool] = {
             VecInit(requestTable.zipWithIndex.map{ case (entry,i) =>
-                (entry.descriptor.addr === incomingDesc.addr) && (incomingDesc.dst.asUInt === 0.U) && (entry.descriptor.baseID === incomingDesc.baseID) && !(receivingEntry === i.U && dataRegFull) && !(receivingEntry2 === i.U && dataReg2Full)
+                entry.active && (entry.descriptor.addr === incomingDesc.addr) && (incomingDesc.dst.asUInt === 0.U) && (entry.descriptor.dst.asUInt === 0.U) && (entry.descriptor.baseID === incomingDesc.baseID) && !(receivingEntry === i.U && dataRegFull) && !(receivingEntry2 === i.U && dataReg2Full)
             })
         }
 
