@@ -12,6 +12,7 @@ import freechips.rocketchip.diplomacy.BufferParams.flow
 import freechips.rocketchip.tilelink.TLMessages.AccessAck
 import freechips.rocketchip.tilelink.TLMessages.AccessAckData
 import freechips.rocketchip.diplomacy.{AddressRange, LazyModule, LazyModuleImp}
+import freechips.rocketchip.resources.HasReservedAddressRange
 import freechips.rocketchip.subsystem.{BaseSubsystem, MBUS, Attachable}
 import freechips.rocketchip.subsystem._
 import freechips.rocketchip.subsystem.Attachable
@@ -26,8 +27,8 @@ import _root_.subsystem.rme.{DTUCachedRegionManager, DTUUncachedRegion}
 
 case class RelMemParams (
     regaddress: Int = 0x3000000,
-    rmeaddress: BigInt =     0x170000000L,
-    rmeAddressSize: BigInt =  0x10000000L,
+    rmeaddress: BigInt =     0x100000000L,
+    rmeAddressSize: BigInt =  0x80000000L,
     controlBeatBytes : Int = 8,
     nFetchUnits : Int = 16,
     inBoundXbar : Option[TLXbar] = None,
@@ -151,7 +152,7 @@ class RME(params: RelMemParams)(implicit p: Parameters) extends LazyModule
         val r_RowSize = RegInit(0.U(32.W))
         val r_RowCount = RegInit(0.U(32.W))
         val r_EnabledColumnCount = RegInit(0.U(4.W))
-        val r_ColumnWidths = RegInit(2.U(2.W)) //  width = 2^n
+        val r_ColumnWidths = RegInit(2.U(3.W)) //  width = 2^n
         val r_ColumnOffsets = RegInit(VecInit(Seq.fill(15)(0.U(7.W))))
         val r_FrameOffset = RegInit(0.U(32.W))
         val r_Reset = RegInit(false.B)
@@ -615,9 +616,6 @@ trait CanHaveRME extends {
   val dtu_uncached_region : Option[DTUUncachedRegion]
 }
 
-trait HasReservedAddressRange extends Device {
-  hasReservedRange = true
-}
 
 
 

@@ -219,6 +219,7 @@ class PreFetchUnitRME(params: RelMemParams, tlInEdge : TLEdge, tlOutEdge: TLEdge
     } 
 
     
+    val maxRMEOffsetBitWidth = log2Ceil(params.rmeAddressSize)
 
     
     val nInjectionPackets = depthAhead * 2
@@ -227,7 +228,7 @@ class PreFetchUnitRME(params: RelMemParams, tlInEdge : TLEdge, tlOutEdge: TLEdge
       RegInit(VecInit(Seq.fill(nInjectionPackets)(0.U(512.W))))
 
     val injectionPacketAddr =
-      RegInit(VecInit(Seq.fill(nInjectionPackets)(0.U(28.W))))
+      RegInit(VecInit(Seq.fill(nInjectionPackets)(0.U(maxRMEOffsetBitWidth.W))))
 
     val injectionPacketsValid =
       RegInit(VecInit(Seq.fill(nInjectionPackets)(false.B)))

@@ -123,14 +123,72 @@ class ColumnExtractor(params: RelMemParams, inMaxID : Int, outmaxID : Int, nExtr
 
 
         switch(dataSize) {
-            is(0.U) { result := shifted(7, 0) }      // 1 byte
-            is(1.U) { result := shifted(15, 0) }     // 2 bytes
-            is(2.U) { result := shifted(31, 0) }     // 4 bytes
-            is(3.U) { result := shifted(63, 0) }     // 8 bytes
+            is(0.U) { 
+                io.Packer.bits.dataVecIn(i) := shifted(7, 0)
+                io.Packer.bits.dataInValid(i) := descriptorsValid(i) 
+            
+            }      // 1 byte
+            is(1.U) { 
+                
+                io.Packer.bits.dataVecIn(i) := shifted(15, 0) 
+                io.Packer.bits.dataInValid(i) := descriptorsValid(i)
+            }     // 2 bytes
+            is(2.U) { 
+                io.Packer.bits.dataVecIn(i) := shifted(31, 0)
+                io.Packer.bits.dataInValid(i) := descriptorsValid(i)
+            }     // 4 bytes
+            is(3.U) { 
+                io.Packer.bits.dataVecIn(i) := shifted(63, 0)
+                io.Packer.bits.dataInValid(i) := descriptorsValid(i)
+            }     // 8 bytes
+            is(4.U) {           
+                    if (i < 4)
+                    {                                          // 16 bytes
+                      io.Packer.bits.dataVecIn(i*2) := shifted(63, 0)
+                      io.Packer.bits.dataVecIn(i*2+1) := shifted(127, 64)
+                      io.Packer.bits.dataInValid(i*2) := descriptorsValid(i)
+                      io.Packer.bits.dataInValid(i*2+1) := descriptorsValid(i)
+                    }
+            }
+            is(5.U) {            // 32 bytes
+                    if (i < 2)
+                    {
+                      io.Packer.bits.dataVecIn(i*4)     := shifted(63, 0)
+                      io.Packer.bits.dataVecIn(i*4+1)   := shifted(127, 64)
+                      io.Packer.bits.dataVecIn(i*4+2)   := shifted(191, 128)
+                      io.Packer.bits.dataVecIn(i*4+3)   := shifted(255, 192)
+                      io.Packer.bits.dataInValid(i*4) := descriptorsValid(i)
+                      io.Packer.bits.dataInValid(i*4+1) := descriptorsValid(i)
+                      io.Packer.bits.dataInValid(i*4+2) := descriptorsValid(i)
+                      io.Packer.bits.dataInValid(i*4+3) := descriptorsValid(i)
+                    }                                         
+            }
+            is(6.U) {       
+                                                              // 64 bytes
+                    if (i  == 0)
+                    {
+                      io.Packer.bits.dataVecIn(0)   := shifted(63, 0)
+                      io.Packer.bits.dataVecIn(1)   := shifted(127, 64)
+                      io.Packer.bits.dataVecIn(2)   := shifted(191, 128)
+                      io.Packer.bits.dataVecIn(3)   := shifted(255, 192)
+                      io.Packer.bits.dataVecIn(4)   := shifted(319, 256)
+                      io.Packer.bits.dataVecIn(5)   := shifted(383, 320)
+                      io.Packer.bits.dataVecIn(6)   := shifted(447, 384)
+                      io.Packer.bits.dataVecIn(7)   := shifted(511, 448)
+                      io.Packer.bits.dataInValid(0) := descriptorsValid(i)
+                      io.Packer.bits.dataInValid(1) := descriptorsValid(i)
+                      io.Packer.bits.dataInValid(2) := descriptorsValid(i)
+                      io.Packer.bits.dataInValid(3) := descriptorsValid(i)
+                      io.Packer.bits.dataInValid(4) := descriptorsValid(i)
+                      io.Packer.bits.dataInValid(5) := descriptorsValid(i)
+                      io.Packer.bits.dataInValid(6) := descriptorsValid(i)
+                      io.Packer.bits.dataInValid(7) := descriptorsValid(i)
+                    }
+            }  
         }
 
-        io.Packer.bits.dataVecIn(i) := result
-        io.Packer.bits.dataInValid(i) := descriptorsValid(i)
+
+
         when (io.Packer.fire)
         {
            // SynthesizePrintf("(ColExtract%d) data 0x%x\n", i.U, result)
@@ -142,36 +200,11 @@ class ColumnExtractor(params: RelMemParams, inMaxID : Int, outmaxID : Int, nExtr
 
 
 
-
-    io.Packer.bits.dataSize := descriptor.size
+    // we split up larger data sizes larger than 8
+    io.Packer.bits.dataSize :=
+        Mux(descriptor.size > 3.U, 3.U, descriptor.size) 
         
 
     io.Packer.bits.descriptorIn  := descriptor
    
-
-
-
-    //when (descriptorCount > 0.U) {  //
-    //    io.Packer.valid := true.B
-    //    val desc = ActiveDescriptor()   //
-    //    val result = Wire(UInt(64.W)) // max = 8 bytes
-    //    result := 0.U   //
-    //    val byteOffset = Wire(UInt(7.W))
-    //    byteOffset := desc.start
-    //    val dataSize = desc.size    //
-    //    val shifted = tmpLine >> (byteOffset << 3)  //
-    //    
-    //    switch(dataSize) {
-    //        is(0.U) { result := shifted(7, 0) }      // 1 byte
-    //        is(1.U) { result := shifted(15, 0) }     // 2 bytes
-    //        is(2.U) { result := shifted(31, 0) }     // 4 bytes
-    //        is(3.U) { result := shifted(63, 0) }     // 8 bytes
-    //    }   //
-    //   // SynthesizePrintf("[ColExtractor] DescriptorCount %d. start %d Extracted: %d\n", descriptorCount,desc.start, result)
-    //    
-    //    io.Packer.bits.dataIn := result
-    //    io.Packer.valid := true.B
-    //    io.Packer.bits.placement := desc.pos
-    //    io.Packer.bits.descriptorIn  := descriptor
-    //}
 }

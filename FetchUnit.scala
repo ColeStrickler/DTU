@@ -206,7 +206,7 @@ class FetchUnitRME(params: RelMemParams, adapter: TLAdapterNode, cachedRegionEdg
         def DescriptorToOutReq(desc: RequestDescriptor, src: UInt): TLBundleA = {
             val (legal, ret) = tlOutEdge.Get(          // use the edge you already have!
                 fromSource = src,
-                toAddress  = desc.addr,
+                toAddress  = Mux(desc.addr < (params.rmeaddress + params.rmeAddressSize).U, desc.addr, params.rmeaddress.U),
                 lgSize     = 6.U
             )
             // legal should be true — add assert(legal) in synthesis if you want
@@ -218,11 +218,13 @@ class FetchUnitRME(params: RelMemParams, adapter: TLAdapterNode, cachedRegionEdg
         def DescriptorToCacheReq(desc: RequestDescriptor, src: UInt): TLBundleA = {
             val (legal, ret) = toCacheOutTLInEdge.Get(          // use the edge you already have!
                 fromSource = src, // may need to do something different with the sources here....
-                toAddress  = desc.addr,
+                toAddress  = Mux(desc.addr < (params.rmeaddress + params.rmeAddressSize).U, desc.addr, params.rmeaddress.U),
                 lgSize     = 6.U
             )
             // legal should be true — add assert(legal) in synthesis if you want
-            assert(legal)
+              when (io.LLCOutReq.valid) {
+                assert(legal)
+            }
             ret  // the helper already sets opcode, param, size, address, mask, data=0, corrupt=false, etc. correctly
         }
 
@@ -338,7 +340,11 @@ class FetchUnitRME(params: RelMemParams, adapter: TLAdapterNode, cachedRegionEdg
 
         
         when (io.OutReq.fire) {
-        //SynthesizePrintf("[FetchUnit]: OutReq.fire 0x%x src %d\n", io.OutReq.bits.address, io.OutReq.bits.source)
+        SynthesizePrintf(
+            "[DTU-TRACE fetch-dram] addr=0x%x size=%d source=%d\n",
+            io.OutReq.bits.address,
+            io.OutReq.bits.size,
+            io.OutReq.bits.source)
              // SynthesizePrintf(
  //   "[DTU-A] addr=0x%x size=%d mask=0x%x beatFirst=%d beatLast=%d\n",
  //   io.OutReq.bits.address,
@@ -347,6 +353,35 @@ class FetchUnitRME(params: RelMemParams, adapter: TLAdapterNode, cachedRegionEdg
  //   tlOutEdge.firstlast(io.OutReq)._1,
  //   tlOutEdge.firstlast(io.OutReq)._2
  // )
+        }
+
+        // Show the exact request which reaches the cache-facing TileLink edge.
+        // Print a legal request only when it handshakes, and print an illegal
+        // request once even if it remains valid while the receiver is blocked.
+        val (llcOutLegal, _) = toCacheOutTLInEdge.Get(
+            fromSource = io.LLCOutReq.bits.source,
+            toAddress = io.LLCOutReq.bits.address,
+            lgSize = io.LLCOutReq.bits.size)
+        val illegalLLCPrinted = RegInit(false.B)
+        when (!io.LLCOutReq.valid || llcOutLegal) {
+            illegalLLCPrinted := false.B
+        }
+        when (io.LLCOutReq.fire) {
+            SynthesizePrintf(
+                "[DTU-TRACE fetch-llc] addr=0x%x size=%d source=%d legal=%d\n",
+                io.LLCOutReq.bits.address,
+                io.LLCOutReq.bits.size,
+                io.LLCOutReq.bits.source,
+                llcOutLegal)
+        }
+        when (io.LLCOutReq.valid && !llcOutLegal && !illegalLLCPrinted) {
+            SynthesizePrintf(
+                "[DTU-TRACE ILLEGAL fetch-llc] addr=0x%x size=%d source=%d ready=%d\n",
+                io.LLCOutReq.bits.address,
+                io.LLCOutReq.bits.size,
+                io.LLCOutReq.bits.source,
+                io.LLCOutReq.ready)
+            illegalLLCPrinted := true.B
         }
 
         val (d_first, d_last, d_done, _, d_count) = tlOutEdge.firstlast2(io.inReply)
@@ -466,6 +501,5 @@ class FetchUnitRME(params: RelMemParams, adapter: TLAdapterNode, cachedRegionEdg
             }
         }
 }
-
 
 

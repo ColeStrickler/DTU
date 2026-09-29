@@ -35,7 +35,7 @@ case class RequestDescriptor(inMaxID:Int, outmaxID : Int) extends Bundle
     val done  = Bool()
     val dst = DESTINATION()
     val addr = UInt(33.W)
-    val size = UInt(2.W) // hardcode for max of 8 for now
+    val size = UInt(3.W) // hardcode for max of 8 for now
   //  val ticket = UInt(16.W)
 }
 
@@ -157,7 +157,14 @@ class RequestorRME(params: RelMemParams, tlInEdge : TLEdge, tlOutEdge: TLEdge, t
         val newReqOffset = (requestQueue.io.deq.bits.BaseRequest.address - config_physStart)(31, 0)
         when(requestQueue.io.deq.fire)
         {
-            //SynthesizePrintf("NewReqOffset 0x%x = 0x%x - 0x%x\n", newReqOffset, requestQueue.io.deq.bits.BaseRequest.address, config_physStart)
+            SynthesizePrintf(
+                "[DTU-TRACE trap] req=0x%x physStart=0x%x size=0x%x offset=0x%x backingStart=0x%x config=%d\n",
+                requestQueue.io.deq.bits.BaseRequest.address,
+                config_physStart,
+                config_size,
+                newReqOffset,
+                EphemeralRegionConfig_Start,
+                requestQueue.io.deq.bits.configMatch)
         }
 
 
@@ -380,7 +387,13 @@ class RequestorRME(params: RelMemParams, tlInEdge : TLEdge, tlOutEdge: TLEdge, t
 
                 when (io.agu.offset.fire)
                 {
-                    SynthesizePrintf("AGU.fire 0x%x src %d --> fetchAddr 0x%x srcAddr=0x%x config %d\n", io.agu.offset.bits, descriptorOut.baseID, descriptorOut.addr, baseRequest.address, config.U)
+                    SynthesizePrintf(
+                        "[DTU-TRACE descriptor] aguOffset=0x%x fetchAddr=0x%x trappedAddr=0x%x source=%d config=%d\n",
+                        io.agu.offset.bits,
+                        descriptorOut.addr,
+                        baseRequest.address,
+                        descriptorOut.baseID,
+                        config.U)
                 }
 
                 when (outQueue.io.enq.fire)
