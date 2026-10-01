@@ -169,7 +169,7 @@ class RME(params: RelMemParams)(implicit p: Parameters) extends LazyModule
         val r_FetchToMemoryStall =  if (params.withPerfCounter) Some(RegInit(0.U(64.W))) else None
         val r_CtrlToTrapperStall =  if (params.withPerfCounter) Some(RegInit(0.U(64.W))) else None
         val r_ReqDescFullStall =     if (params.withPerfCounter) Some(RegInit(0.U(64.W))) else None
-        val r_EphemeralRegionConfig_Start = RegInit(VecInit(Seq.fill(params.maxConfigs)(params.rmeaddress.U(33.W))))
+        val r_EphemeralRegionConfig_Start = RegInit(VecInit(Seq.fill(params.maxConfigs)(params.rmeaddress.U(47.W))))
         val r_EphemeralRegionConfig_Size = RegInit(VecInit(Seq.fill(params.maxConfigs)(0.U(log2Ceil(params.rmeAddressSize).W))))
         val r_EphemeralRegionConfig_PhysStart = RegInit(VecInit(Seq.fill(params.maxConfigs)(0.U(47.W))))
 
@@ -517,45 +517,34 @@ class RME(params: RelMemParams)(implicit p: Parameters) extends LazyModule
         req.Config := config
       }
 
+      fetch_unit.io.Config := config
+
 
       val reqFetchIO = requestors.map(_.FetchUnit)
-      val reqdoneIO = requestors.map(_.FetchUnit.bits.descriptor.done)
-
       val fetchUnitReady = fetch_unit.io.Requestor.ready
-      
-
-      val RequestorActive = RegInit(false.B)
-      val ActiveRequestor = RegInit(0.U(log2Ceil(params.maxConfigs).W))
-      val active_vector = reqFetchIO.map(req => req.fire)
-      //(s"OUT.D.BITS ${out.d.bits.data.getWidth}")
-
-      reqFetchIO.zipWithIndex.foreach {case (req, i) =>
-          
-          when (reqdoneIO(i) && req.fire && ActiveRequestor === i.U)
-          {
-            RequestorActive :=  false.B
-          }
-          .elsewhen (req.fire) 
-          {
-            ActiveRequestor := i.U
-            RequestorActive := true.B
-          }
-      }
-      
-      // this should fire to the right one
-  
-
-
-      /*
-        Before, I think we were swapping out the active request when it was still in the queue
-
-      */
       val requestorArb = Module(new RRArbiter(requestors.head.FetchUnit.bits.cloneType, params.maxConfigs))
       requestorArb.io.in <> reqFetchIO
-      reqFetchIO.zipWithIndex.foreach {case (req, i) => 
-        req.ready := requestorArb.io.in(i).ready && (!RequestorActive || ActiveRequestor === i.U)
-        requestorArb.io.in(i).valid := req.valid && (!RequestorActive || ActiveRequestor === i.U)
-      }
+
+      // Previous implementation: once a requestor fired, it retained exclusive access
+      // until its descriptor marked the final request. This prevented other requestors
+      // from making progress while a long request-generation stream was active.
+      //
+      // val reqdoneIO = requestors.map(_.FetchUnit.bits.descriptor.done)
+      // val RequestorActive = RegInit(false.B)
+      // val ActiveRequestor = RegInit(0.U(log2Ceil(params.maxConfigs).W))
+      // val active_vector = reqFetchIO.map(req => req.fire)
+      // reqFetchIO.zipWithIndex.foreach { case (req, i) =>
+      //   when (reqdoneIO(i) && req.fire && ActiveRequestor === i.U) {
+      //     RequestorActive := false.B
+      //   }.elsewhen (req.fire) {
+      //     ActiveRequestor := i.U
+      //     RequestorActive := true.B
+      //   }
+      // }
+      // reqFetchIO.zipWithIndex.foreach { case (req, i) =>
+      //   req.ready := requestorArb.io.in(i).ready && (!RequestorActive || ActiveRequestor === i.U)
+      //   requestorArb.io.in(i).valid := req.valid && (!RequestorActive || ActiveRequestor === i.U)
+      // }
 
 
       

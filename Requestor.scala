@@ -28,13 +28,14 @@ object DESTINATION extends ChiselEnum {
   val CONTROL_UNIT, PREFETCH_UNIT = Value
 }
 
-case class RequestDescriptor(inMaxID:Int, outmaxID : Int) extends Bundle
+case class RequestDescriptor(inMaxID:Int, outmaxID : Int, params: RelMemParams = RelMemParams()) extends Bundle
 {
+    val config = UInt(log2Ceil(params.maxConfigs).W)
     val baseID = UInt(log2Ceil(inMaxID).W)
     val requestPlacement = UInt(7.W) // max of 64 places if we are doing 1 byte at a time selection
     val done  = Bool()
     val dst = DESTINATION()
-    val addr = UInt(33.W)
+    val addr = UInt(log2Ceil((BigInt(1) << 47)).W)
     val size = UInt(3.W) // hardcode for max of 8 for now
   //  val ticket = UInt(16.W)
 }
@@ -71,7 +72,7 @@ case class RequestorAGUPort(bitwidth : Int = 32) extends Bundle
     //val doGen = Decoupled(Bool())
     val offsetAddrFromBase = Decoupled(UInt(bitwidth.W))    // input
     val offset = Flipped(Decoupled(UInt(bitwidth.W)))       // output
-    val data_size = Output(UInt(6.W))                       // used by agu
+    val data_size = Output(UInt(8.W))                       // used by agu
 }
 
 
@@ -174,7 +175,7 @@ class RequestorRME(params: RelMemParams, tlInEdge : TLEdge, tlOutEdge: TLEdge, t
 
         val nDescriptors = RegInit(0.U(8.W))
         nDescriptors := 64.U(7.W) >> io.Config.ColumnWidths
-        val backingEphemeralRegionStart = RegInit(0.U(33.W))
+        val backingEphemeralRegionStart = RegInit(0.U(47.W))
         val requestOffset = RegInit(0.U(maxRMEOffsetBitWidth.W))
         backingEphemeralRegionStart := Mux(requestQueue.io.deq.fire, EphemeralRegionConfig_Start, backingEphemeralRegionStart)
         requestOffset := Mux(requestQueue.io.deq.fire, newReqOffset, requestOffset)
@@ -364,6 +365,7 @@ class RequestorRME(params: RelMemParams, tlInEdge : TLEdge, tlOutEdge: TLEdge, t
                 descriptorOut.requestPlacement := nDescriptorsSent
                 descriptorOut.done := done
                 descriptorOut.dst := DESTINATION.CONTROL_UNIT
+                descriptorOut.config := config.U
                 //descriptorOut.zero := io.agu.zero
                 descriptorOut.addr := addr_desc_out + backingEphemeralRegionStart
                 val extractionDescriptorOut = Wire(ExtractionDescriptor(4))

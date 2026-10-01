@@ -21,7 +21,7 @@ case class RMEConfigPortIO(params: RelMemParams) extends Bundle
     val ColumnOffsets = Output(Vec(15, UInt(7.W))) // offset off column j from column j-1
     val FrameOffset = Output(UInt(32.W))
     val Enabled = Output(Bool())
-    val EphemeralRegionConfig_Start = Output(Vec(params.maxConfigs, UInt(33.W))) 
+    val EphemeralRegionConfig_Start = Output(Vec(params.maxConfigs, UInt(47.W))) 
     val EphemeralRegionConfig_Size = Output(Vec(params.maxConfigs, UInt(log2Ceil(params.rmeAddressSize).W))) 
     val EphemeralRegionConfig_PhysStart = Output(Vec(params.maxConfigs, UInt(47.W)))
 }

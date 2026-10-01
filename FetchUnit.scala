@@ -30,11 +30,14 @@ case class FetchUnitControlPort(tlParams : TLBundleParameters, inMaxID : Int, ou
 }
 
 
-case class FetchUnitIO(tlInParams: TLBundleParameters, tlOutParams: TLBundleParameters, inMaxID : Int, outMaxID : Int, dataRegWidth : Int, toCacheParams: TLBundleParameters) extends Bundle
+case class FetchUnitIO(tlInParams: TLBundleParameters, tlOutParams: TLBundleParameters, inMaxID : Int, outMaxID : Int, dataRegWidth : Int, toCacheParams: TLBundleParameters, params: RelMemParams) extends Bundle
 {
+
+    
+
 // Requestor Port
         val Requestor = Flipped(Decoupled(new RequestorFetchUnitPort(inMaxID, outMaxID))) // Receive address to request from the Requestor Module]
-
+        val Config = Flipped(RMEConfigPortIO(params))
         val Prefetch = Flipped(new FetchUnitPrefetchUnitPort(inMaxID, outMaxID))
         //val FetchReq = Flipped(Decoupled(Output(new TLBundleA(tlInEdge.bundle))))
         //val isBaseRequest = Flipped(Output(Bool()))
@@ -85,7 +88,7 @@ class FetchUnitRME(params: RelMemParams, adapter: TLAdapterNode, cachedRegionEdg
         val srcID = (outMaxID - subInstance).U
         println(s"inMaxID $inMaxID outMaxID $outMaxID using SrCID ${outMaxID - subInstance}")
         println(s"dataRegWidth $dataRegWidth")
-        val io = IO(new FetchUnitIO(tlInParams, tlOutParams, inMaxID, outMaxID, dataRegWidth, toCacheTLParams)).suggestName(s"fetchunitio_$instance-$subInstance")
+        val io = IO(new FetchUnitIO(tlInParams, tlOutParams, inMaxID, outMaxID, dataRegWidth, toCacheTLParams, params)).suggestName(s"fetchunitio_$instance-$subInstance")
 
         println(s"\n\n\nout data width ${io.OutReq.bits.data.getWidth}\n\n\n")
         io.OutReq.valid := false.B
@@ -215,10 +218,10 @@ class FetchUnitRME(params: RelMemParams, adapter: TLAdapterNode, cachedRegionEdg
         }
 
 
-        def DescriptorToCacheReq(desc: RequestDescriptor, src: UInt): TLBundleA = {
+        def DescriptorToCacheReq(desc: RequestDescriptor, src: UInt, toDTUCond: Bool): TLBundleA = {
             val (legal, ret) = toCacheOutTLInEdge.Get(          // use the edge you already have!
                 fromSource = src, // may need to do something different with the sources here....
-                toAddress  = Mux(desc.addr < (params.rmeaddress + params.rmeAddressSize).U, desc.addr, params.rmeaddress.U),
+                toAddress  = Mux(desc.addr < (params.rmeaddress + params.rmeAddressSize).U || toDTUCond, desc.addr, params.rmeaddress.U),
                 lgSize     = 6.U
             )
             // legal should be true — add assert(legal) in synthesis if you want
@@ -228,6 +231,20 @@ class FetchUnitRME(params: RelMemParams, adapter: TLAdapterNode, cachedRegionEdg
             ret  // the helper already sets opcode, param, size, address, mask, data=0, corrupt=false, etc. correctly
         }
 
+
+        def AddrIsValidConfig(addr: UInt, config: UInt): Bool = {
+            val inEphemeralRegion =
+                io.Config.EphemeralRegionConfig_PhysStart
+                    .zip(io.Config.EphemeralRegionConfig_Size)
+                    .zipWithIndex
+                    .map { case ((start, size), i) =>
+                        // i is the Scala index here
+                        (addr >= start) && (addr < (start +& size)) && (i.U =/= config)
+                    }
+                    .reduce(_ || _)
+
+            inEphemeralRegion
+        }
 
 
         println(s"(FetchUnit) MASK ${new TLBundleA(tlOutParams).mask.getWidth}")
@@ -272,10 +289,10 @@ class FetchUnitRME(params: RelMemParams, adapter: TLAdapterNode, cachedRegionEdg
                 io.OutReq.valid := false.B //!io.IncomingReqInCache
                 outReqEntryToSend := alloc_entry
                 val src = outMaxID.U-alloc_entry
-                io.OutReq.bits := DescriptorToOutReq(io.Requestor.bits.descriptor, src)
+                //io.OutReq.bits := DescriptorToOutReq(io.Requestor.bits.descriptor, src)
                 firstWaitCycle := true.B
 
-                io.LLCOutReq.bits := DescriptorToCacheReq(io.Requestor.bits.descriptor, alloc_entry)
+                //io.LLCOutReq.bits := DescriptorToCacheReq(io.Requestor.bits.descriptor, alloc_entry)
                 io.LLCOutReq.valid :=false.B // io.IncomingReqInCache
 
                 when (io.OutReq.fire) {
@@ -306,10 +323,15 @@ class FetchUnitRME(params: RelMemParams, adapter: TLAdapterNode, cachedRegionEdg
             val outReqToCache = Wire(new TLBundleA(toCacheTLParams))
 
             val src = outMaxID.U-outReqEntryToSend
+            val maxDRAM = math.pow(2, 33).toLong
+            val descriptorAddr = requestTable(outReqEntryToSend).descriptor.addr
+            val descriptorConfig = requestTable(outReqEntryToSend).descriptor.config
+            val isDTUAddr = descriptorAddr >= maxDRAM.U
             outReq := DescriptorToOutReq(requestTable(outReqEntryToSend).descriptor, src)
-            outReqToCache := DescriptorToCacheReq(requestTable(outReqEntryToSend).descriptor, outReqEntryToSend)
+            val toDTUCond = isDTUAddr && AddrIsValidConfig(descriptorAddr, descriptorConfig)
+            outReqToCache := DescriptorToCacheReq(requestTable(outReqEntryToSend).descriptor, outReqEntryToSend, toDTUCond)
 
-            val ReqIsToCache = Mux(firstWaitCycle, io.IncomingReqInCache, hasOutReqToCache) 
+            val ReqIsToCache = Mux(firstWaitCycle, io.IncomingReqInCache || toDTUCond, hasOutReqToCache) 
             hasOutReqToCache := Mux(firstWaitCycle, Mux((io.OutReq.fire || io.LLCOutReq.fire), false.B, ReqIsToCache), ReqIsToCache && (!io.OutReq.fire && !io.LLCOutReq.fire))
             firstWaitCycle := false.B
 

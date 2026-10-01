@@ -151,7 +151,7 @@ case class PrefetchUnitAGUIO(params: RelMemParams) extends Bundle {
 case class PrefetchUnitFetchUnitPortIn() extends Bundle
 {
   val data = UInt(512.W) // 64 bytes = 1 cache line
-  val addr = UInt(33.W) // will take out of the reqTableEntry
+  val addr = UInt(47.W) // will take out of the reqTableEntry
   val config = UInt(4.W)
 }
 
@@ -232,7 +232,7 @@ class PreFetchUnitRME(params: RelMemParams, tlInEdge : TLEdge, tlOutEdge: TLEdge
 
     val injectionPacketsValid =
       RegInit(VecInit(Seq.fill(nInjectionPackets)(false.B)))
-    val stream2PhysicalAddressStart = RegInit((params.rmeaddress + 0x08000000L).U(33.W)) // pointed to the corresponding metadata stream start 
+    val stream2PhysicalAddressStart = RegInit((params.rmeaddress + 0x08000000L).U(47.W)) // pointed to the corresponding metadata stream start 
     stream2PhysicalAddressStart := io.Requestor.config_StreamPhysRegisters(0)
     def CheckRequestorReqPresentPacketTable(reqAddr: UInt): (Bool, UInt) = {
     val matches = injectionPacketAddr.zip(injectionPacketsValid).map {
@@ -297,6 +297,7 @@ class PreFetchUnitRME(params: RelMemParams, tlInEdge : TLEdge, tlOutEdge: TLEdge
         descriptorOut.dst := DESTINATION.PREFETCH_UNIT
         descriptorOut.addr := addr + stream2PhysicalAddressStart
         descriptorOut.size := 6.U
+        descriptorOut.config := config.U
         descriptorOut
     }
     
