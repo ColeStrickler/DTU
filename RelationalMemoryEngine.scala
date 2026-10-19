@@ -159,8 +159,9 @@ class RME(params: RelMemParams)(implicit p: Parameters) extends LazyModule
         val r_EnableRME = RegInit(false.B)
 
 
-        val perfDTU = RegInit(0.U(64.W))
-        val perfNonDTU = RegInit(0.U(64.W))
+        val perfDTU = RegInit(0.U(64.W)) // track total DTU requests
+        val perfNonDTU = RegInit(0.U(64.W)) // track normal memory requests
+        val perfPrefetchUnit = RegInit(0.U(64.W)) // track prefetch unit traffic
 
 
 
@@ -250,9 +251,9 @@ class RME(params: RelMemParams)(implicit p: Parameters) extends LazyModule
       }
       val dtu_access_reg = Seq((0xf00) -> Seq(RegField(perfDTU.getWidth, perfDTU, RegFieldDesc("perfDTU", "perfDTU"))))
       val nondtu_access_reg = Seq((0xf08) -> Seq(RegField(perfNonDTU.getWidth, perfNonDTU, RegFieldDesc("perfNonDTUl", "perfNonDTU"))))
-          
+      val prefetch_access_reg = Seq((0xf10) -> Seq(RegField(perfPrefetchUnit.getWidth, perfPrefetchUnit, RegFieldDesc("perfPreDTU", "perfPreDTU"))))
 
-     
+
       val mmreg = mmio_Enable ++ mmio_RowSize ++ mmio_RowCount ++ mmio_EnabledColumnCount ++ 
                   mmio_ColumnWidth ++ mmio_ColumnOffsets ++ mmio_FrameOffset ++ mmio_Reset ++ perfCounters ++
                   mmio_EphemeralConfigStart ++ mmio_EphemeralConfigSize ++ mmio_EphemeralRegionConfig_PhysStart ++ dtu_access_reg ++ nondtu_access_reg
@@ -550,6 +551,7 @@ class RME(params: RelMemParams)(implicit p: Parameters) extends LazyModule
       
 
       val prefetchArb = Module(new RRArbiter(prefetch_units.head.FetchUnit.ToFetchUnit.bits.cloneType, params.maxConfigs))
+      perfPrefetchUnit := perfPrefetchUnit + prefetchArb.io.out.fire
       prefetch_units.zipWithIndex.foreach { case (pre, i) => 
         prefetchArb.io.in(i) <> pre.FetchUnit.ToFetchUnit  
       }
@@ -651,13 +653,13 @@ trait CanHavePeripheryRME { this: BaseSubsystem =>
     //val uncached = LazyModule(new DTUUncachedRegion)
 
     
-    sbus.coupleTo("dtu_uncached") {
-      mbus.dtu_uncached_region.get.cpuNode := 
-      TLBuffer(1)  :=  _
-    }
+    //sbus.coupleTo("dtu_uncached") {
+    //  mbus.dtu_uncached_region.get.cpuNode := 
+    //  TLBuffer(1)  :=  _
+    //}
       // Connect uncached region to memory bus (MBUS) := TLFragmenter(mbus.beatBytes, mbus.blockBytes, holdFirstDeny=true)
 
-    mbus.coupleFrom("simple_uncached_region_mem") { _ := mbus.dtu_uncached_region.get.memNode }
+   // mbus.coupleFrom("simple_uncached_region_mem") { _ := mbus.dtu_uncached_region.get.memNode }
           
     None
       //mbus.rme.get

@@ -153,6 +153,8 @@ class ControlUnitRME(params: RelMemParams, tlOutEdge: TLEdgeOut, tlCachedEdge: T
         .otherwise {
             when (io.FetchUnitPort.fire) {
               //  SynthesizePrintf("[ControlUnit] in.fire! total desc 0x%x baseID %d ---> to %d\n", io.FetchUnitPort.bits.reqTableEntry.activeDesc, io.FetchUnitPort.bits.reqTableEntry.descriptor.baseID, freeEntry)
+                currentlyPacking(freeEntry) := true.B
+                BaseReqSrc(freeEntry) := baseIDFromDesc
             }
             colExtractorIOs(freeEntry).CtrlUnit.valid := io.FetchUnitPort.fire
             colExtractorIOs(freeEntry).CtrlUnit.bits.data := io.FetchUnitPort.bits.data
@@ -161,8 +163,7 @@ class ControlUnitRME(params: RelMemParams, tlOutEdge: TLEdgeOut, tlCachedEdge: T
             colExtractorIOs(freeEntry).CtrlUnit.bits.descriptorIn := io.FetchUnitPort.bits.reqTableEntry.descriptor
             //colExtractorIOs(freeEntry).CtrlUnit.bits.nDesc := io.FetchUnitPort.bits.reqTableEntry.activeDesc
             colExtractorIOs(freeEntry).CtrlUnit.bits.extractionDescriptorsValid := io.FetchUnitPort.bits.reqTableEntry.extractionDescriptorsValid
-            currentlyPacking(freeEntry) := true.B
-            BaseReqSrc(freeEntry) := baseIDFromDesc
+
         }
 
 
