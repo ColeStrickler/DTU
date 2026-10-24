@@ -77,6 +77,22 @@ case class RequestorAGUPort(bitwidth : Int = 32) extends Bundle
 
 
 
+// Read-only state exported to one shared, stall-triggered diagnostic site.
+class RequestorDiagnostic(tlParams: TLBundleParameters) extends Bundle {
+    val active = Bool()
+    val requestCount = UInt(5.W) // sixteen-entry input queue
+    val outputCount = UInt(5.W)  // sixteen-entry descriptor queue
+    val baseSource = UInt(tlParams.sourceBits.W)
+    val baseAddress = UInt(tlParams.addressBits.W)
+    val descriptorsSent = UInt(8.W)
+    val descriptorsNeeded = UInt(8.W)
+    val initVR = UInt(2.W)
+    val aguVR = UInt(2.W)
+    val fetchVR = UInt(2.W)
+    val started = Valid(UInt(tlParams.sourceBits.W))
+    val generated = Valid(UInt(tlParams.sourceBits.W))
+}
+
 class RequestorRME(params: RelMemParams, tlInEdge : TLEdge, tlOutEdge: TLEdge, tlOutBundle: TLBundle, config: Int)(
     implicit p: Parameters) extends Module{
         val tlOutParams = tlOutEdge.bundle
@@ -110,6 +126,7 @@ class RequestorRME(params: RelMemParams, tlInEdge : TLEdge, tlOutEdge: TLEdge, t
             val Trapper = Flipped(RequestorTrapperPort(tlInParams, params))
 
             val agu = new RequestorAGUPort(maxRMEOffsetBitWidth)
+            val Diagnostic = Output(new RequestorDiagnostic(tlInParams))
 
         }).suggestName(s"requestorio_$config")
 
@@ -133,7 +150,7 @@ class RequestorRME(params: RelMemParams, tlInEdge : TLEdge, tlOutEdge: TLEdge, t
         */
         val active :: idle :: Nil = Enum(2)
         val stateReg = RegInit(idle)
-        val requestQueue = Module(new Queue(TrapperReq(tlInParams, params), 4, flow=true))
+        val requestQueue = Module(new Queue(TrapperReq(tlInParams, params), 16, flow=true))
         val outQueue = Module(new Queue(new RequestorFetchUnitPort(inMaxID, outMaxID), 16, flow=false)) // prevent stalls
         val baseRequest = Reg(new TLBundleA(tlInParams))
         val ModifiedRequestsSent = WireInit(true.B) // track if we have sent all the necessary requests
@@ -158,14 +175,14 @@ class RequestorRME(params: RelMemParams, tlInEdge : TLEdge, tlOutEdge: TLEdge, t
         val newReqOffset = (requestQueue.io.deq.bits.BaseRequest.address - config_physStart)(31, 0)
         when(requestQueue.io.deq.fire)
         {
-            SynthesizePrintf(
-                "[DTU-TRACE trap] req=0x%x physStart=0x%x size=0x%x offset=0x%x backingStart=0x%x config=%d\n",
-                requestQueue.io.deq.bits.BaseRequest.address,
-                config_physStart,
-                config_size,
-                newReqOffset,
-                EphemeralRegionConfig_Start,
-                requestQueue.io.deq.bits.configMatch)
+//             SynthesizePrintf(
+//                 "[DTU-TRACE trap] req=0x%x physStart=0x%x size=0x%x offset=0x%x backingStart=0x%x config=%d\n",
+//                 requestQueue.io.deq.bits.BaseRequest.address,
+//                 config_physStart,
+//                 config_size,
+//                 newReqOffset,
+//                 EphemeralRegionConfig_Start,
+//                 requestQueue.io.deq.bits.configMatch)
         }
 
 
@@ -191,6 +208,22 @@ class RequestorRME(params: RelMemParams, tlInEdge : TLEdge, tlOutEdge: TLEdge, t
         
         //val col = RegInit(0.U(log2Ceil(512 + 1).W))
         val busWidth = 8.U(7.W)
+
+        io.Diagnostic.active := stateReg === active
+        io.Diagnostic.requestCount := requestQueue.io.count
+        io.Diagnostic.outputCount := outQueue.io.count
+        io.Diagnostic.baseSource := baseRequest.source
+        io.Diagnostic.baseAddress := baseRequest.address
+        io.Diagnostic.descriptorsSent := nDescriptorsSent
+        io.Diagnostic.descriptorsNeeded := nDescriptors
+        io.Diagnostic.initVR := Cat(io.agu.offsetAddrFromBase.valid, io.agu.offsetAddrFromBase.ready)
+        io.Diagnostic.aguVR := Cat(io.agu.offset.valid, io.agu.offset.ready)
+        io.Diagnostic.fetchVR := Cat(io.FetchUnit.valid, io.FetchUnit.ready)
+        io.Diagnostic.started.valid := requestQueue.io.deq.fire
+        io.Diagnostic.started.bits := requestQueue.io.deq.bits.BaseRequest.source
+        io.Diagnostic.generated.valid := stateReg === active &&
+            nDescriptorsSent === nDescriptors - 1.U && outQueue.io.enq.fire
+        io.Diagnostic.generated.bits := baseRequest.source
 
         /* 
             Defaults
@@ -389,13 +422,13 @@ class RequestorRME(params: RelMemParams, tlInEdge : TLEdge, tlOutEdge: TLEdge, t
 
                 when (io.agu.offset.fire)
                 {
-                    SynthesizePrintf(
-                        "[DTU-TRACE descriptor] aguOffset=0x%x fetchAddr=0x%x trappedAddr=0x%x source=%d config=%d\n",
-                        io.agu.offset.bits,
-                        descriptorOut.addr,
-                        baseRequest.address,
-                        descriptorOut.baseID,
-                        config.U)
+//                     SynthesizePrintf(
+//                         "[DTU-TRACE descriptor] aguOffset=0x%x fetchAddr=0x%x trappedAddr=0x%x source=%d config=%d\n",
+//                         io.agu.offset.bits,
+//                         descriptorOut.addr,
+//                         baseRequest.address,
+//                         descriptorOut.baseID,
+//                         config.U)
                 }
 
                 when (outQueue.io.enq.fire)

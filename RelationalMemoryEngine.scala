@@ -588,6 +588,77 @@ class RME(params: RelMemParams)(implicit p: Parameters) extends LazyModule
 }
       
     control_unit.io.FetchUnitPort <> fetch_unit.io.ControlUnit
+    control_unit.io.PackerAdmission <> fetch_unit.io.PackerAdmission
+    fetch_unit.io.PrefetchReady := VecInit(prefetch_units.map(_.FetchUnit.ToPre.ready))
+    // One shared metadata watchdog, rather than one print site per configuration.
+    val metadataWaiting = VecInit(prefetch_units.map { pre =>
+      pre.Requestor.InjectionRequest.valid && !pre.Requestor.InjectionRequest.ready
+    })
+    val metadataProgress = prefetch_units.map(_.Requestor.InjectionRequest.fire).reduce(_ || _)
+    val requestInputBlocked = trapper.io.TLInA.valid && !trapper.io.TLInA.ready
+    val requestStallWork = metadataWaiting.asUInt.orR || requestInputBlocked
+    val requestStallProgress = metadataProgress || trapper.io.TLInA.fire ||
+      requestors.map(_.FetchUnit.fire).reduce(_ || _)
+    val metadataStallCycles = RegInit(0.U(10.W))
+    when (!requestStallWork || requestStallProgress) {
+      metadataStallCycles := 0.U
+    }.elsewhen (!metadataStallCycles.andR) {
+      metadataStallCycles := metadataStallCycles + 1.U
+    }
+    val requestStallSnapshot = requestStallWork && !requestStallProgress &&
+      metadataStallCycles === ((1 << 10) - 2).U
+    val requestDiagnostics = VecInit(requestors.map(_.Diagnostic))
+    val parentTrace = Module(new DTUParentTrace(cachedParams.sourceBits, cachedParams.addressBits, params.maxConfigs))
+    parentTrace.io.accepted.valid := trapper.io.Requestor.trapperReq.fire
+    parentTrace.io.accepted.bits.source := trapper.io.Requestor.trapperReq.bits.BaseRequest.source
+    parentTrace.io.accepted.bits.address := trapper.io.Requestor.trapperReq.bits.BaseRequest.address
+    parentTrace.io.accepted.bits.config := config_hit
+    parentTrace.io.started := VecInit(requestDiagnostics.map(_.started))
+    parentTrace.io.generated := VecInit(requestDiagnostics.map(_.generated))
+    parentTrace.io.completed.valid := cachedRegionIn.d.fire && cachedRegionEdge.last(cachedRegionIn.d)
+    parentTrace.io.completed.bits := cachedRegionIn.d.bits.source
+    parentTrace.io.snapshot := requestStallSnapshot || fetch_unit.io.DiagnosticStall
+    parentTrace.io.progress := requestStallProgress || fetch_unit.io.ControlUnit.fire ||
+        fetch_unit.io.Prefetch.ToPre.fire || cachedRegionIn.d.fire
+    when (requestStallSnapshot) {
+      SynthesizePrintf(
+        "[DTU STALL metadata] waiting=0x%x injectValid=0x%x offsets=0x%x headV=%d headR=%d headCfg=%d headSrc=%d headAddr=0x%x reqQ=0x%x outQ=0x%x busy=0x%x parents=0x%x\n",
+        metadataWaiting.asUInt,
+        VecInit(prefetch_units.map(_.Requestor.Injection.valid)).asUInt,
+        VecInit(prefetch_units.map(_.Requestor.InjectionRequest.bits.RequestAddr)).asUInt,
+        trapper.io.TLInA.valid, trapper.io.TLInA.ready, config_hit,
+        trapper.io.TLInA.bits.source, trapper.io.TLInA.bits.address,
+        VecInit(requestDiagnostics.map(_.requestCount)).asUInt,
+        VecInit(requestDiagnostics.map(_.outputCount)).asUInt,
+        VecInit(requestDiagnostics.map(_.active)).asUInt, parentTrace.io.outstanding.asUInt)
+    }
+
+    // Serialize configuration details through one print site, and stop on progress.
+    val requestDumpActive = RegInit(false.B)
+    val requestDumpIndex = RegInit(0.U(log2Ceil(params.maxConfigs).W))
+    when (!requestStallWork || requestStallProgress) {
+      requestDumpActive := false.B
+    }.elsewhen (requestStallSnapshot) {
+      requestDumpActive := true.B
+      requestDumpIndex := 0.U
+    }.elsewhen (requestDumpActive) {
+      when (requestDumpIndex === (params.maxConfigs - 1).U) {
+        requestDumpActive := false.B
+      }.otherwise {
+        requestDumpIndex := requestDumpIndex + 1.U
+      }
+    }
+    val requestDump = requestDiagnostics(requestDumpIndex)
+    when (requestDumpActive && requestStallWork && !requestStallProgress &&
+          (requestDump.active || requestDump.requestCount.orR || requestDump.outputCount.orR)) {
+      SynthesizePrintf(
+        "[DTU STALL requestor] cfg=%d active=%d reqQ=%d outQ=%d base=%d addr=0x%x sent=%d need=%d initVR=0x%x aguVR=0x%x fetchVR=0x%x\n",
+        requestDumpIndex, requestDump.active, requestDump.requestCount, requestDump.outputCount,
+        requestDump.baseSource, requestDump.baseAddress,
+        requestDump.descriptorsSent, requestDump.descriptorsNeeded,
+        requestDump.initVR, requestDump.aguVR, requestDump.fetchVR)
+    }
+
     val toPreReady = prefetch_units.zipWithIndex.map { case (pre, i) =>
       pre.FetchUnit.ToPre.ready &&
       (fetch_unit.io.Prefetch.ToPre.bits.config === i.U)

@@ -82,10 +82,10 @@ class ColumnExtractor(params: RelMemParams, inMaxID : Int, outmaxID : Int, nExtr
     //}
 
     when(io.CtrlUnit.fire) {
-        SynthesizePrintf(
-            "[Colxtractor] CTRL FIRE inputValidMask=0x%x\n",
-            io.CtrlUnit.bits.extractionDescriptorsValid.asUInt,
-        )
+//         SynthesizePrintf(
+//             "[Colxtractor] CTRL FIRE inputValidMask=0x%x\n",
+//             io.CtrlUnit.bits.extractionDescriptorsValid.asUInt,
+//         )
 
     }
 

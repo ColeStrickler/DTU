@@ -57,6 +57,7 @@ class ControlUnitRME(params: RelMemParams, tlOutEdge: TLEdgeOut, tlCachedEdge: T
 
         // Fetch Unit Port
         val FetchUnitPort = Flipped(DecoupledIO(FetchUnitControlPort(tlParams, inMaxID, outMaxID, dataRegWidth)))
+        val PackerAdmission = Flipped(Vec(2, new PackerAdmissionQuery(inMaxID)))
 
         //val ticket = Output(UInt(16.W)) // help enforce ordering semantics
 
@@ -83,7 +84,7 @@ class ControlUnitRME(params: RelMemParams, tlOutEdge: TLEdgeOut, tlCachedEdge: T
     */
 
         // Number of modules
-        val nPackers = 4
+        val nPackers = 8
 
         // Instantiate modules (distinct hardware instances)
         val packers = Seq.fill(nPackers) {
@@ -122,15 +123,27 @@ class ControlUnitRME(params: RelMemParams, tlOutEdge: TLEdgeOut, tlCachedEdge: T
             packerIOs(i).ColExtractor <> colExtractorIOs(i).Packer
         }
     
-        io.FetchUnitPort.ready := Mux(hasMatch, colExtractorIOs(matchEntry).CtrlUnit.ready, freeVec.reduce(_||_))
+        def canAcceptBaseID(baseID: UInt): Bool = {
+            val matches = VecInit((0 until nPackers).map { i =>
+                currentlyPacking(i) && BaseReqSrc(i) === baseID
+            })
+            Mux(matches.asUInt.orR,
+                colExtractorIOs(PriorityEncoder(matches)).CtrlUnit.ready,
+                freeVec.asUInt.orR)
+        }
+
+        io.PackerAdmission.foreach { query =>
+            query.ready := canAcceptBaseID(query.baseID)
+        }
+        io.FetchUnitPort.ready := canAcceptBaseID(baseIDFromDesc)
 
 
         when (io.FetchUnitPort.fire)
         {
-            SynthesizePrintf(
-                "[ControlUnit] FetchUnitPort FIRE inputValidMask=0x%x\n",
-                io.FetchUnitPort.bits.reqTableEntry.extractionDescriptorsValid.asUInt
-            )
+//             SynthesizePrintf(
+//                 "[ControlUnit] FetchUnitPort FIRE inputValidMask=0x%x\n",
+//                 io.FetchUnitPort.bits.reqTableEntry.extractionDescriptorsValid.asUInt
+//             )
         }
         
 
@@ -171,6 +184,86 @@ class ControlUnitRME(params: RelMemParams, tlOutEdge: TLEdgeOut, tlCachedEdge: T
             assert(hasMatch || freeVec.reduce(_||_))
         }
 
+
+        // Observation-only ownership/progress records. Preserve the user's packer count.
+        val diagnosticCycle = RegInit(0.U(48.W)); diagnosticCycle := diagnosticCycle + 1.U
+        val packerConfig = RegInit(VecInit(Seq.fill(nPackers)(0.U(log2Ceil(params.maxConfigs).W))))
+        val packerAllocatedAt = RegInit(VecInit(Seq.fill(nPackers)(0.U(48.W))))
+        val packerLastInputAt = RegInit(VecInit(Seq.fill(nPackers)(0.U(48.W))))
+        val packerLastPackedAt = RegInit(VecInit(Seq.fill(nPackers)(0.U(48.W))))
+        val packerDeliveredMask = RegInit(VecInit(Seq.fill(nPackers)(0.U(16.W))))
+        val packerPackedMask = RegInit(VecInit(Seq.fill(nPackers)(0.U(16.W))))
+        val packerDuplicateMask = RegInit(VecInit(Seq.fill(nPackers)(0.U(16.W))))
+        val packerObservedBytes = RegInit(VecInit(Seq.fill(nPackers)(0.U(7.W))))
+        when (io.FetchUnitPort.fire) {
+            val index = Mux(hasMatch, matchEntry, freeEntry)
+            val mask = io.FetchUnitPort.bits.reqTableEntry.extractionDescriptorsValid.asUInt
+            packerDeliveredMask(index) := Mux(hasMatch, packerDeliveredMask(index) | mask, mask)
+            packerLastInputAt(index) := diagnosticCycle
+            when (!hasMatch) {
+                packerConfig(index) := io.FetchUnitPort.bits.reqTableEntry.descriptor.config
+                packerAllocatedAt(index) := diagnosticCycle
+                packerLastPackedAt(index) := 0.U
+            }
+        }
+        for (index <- 0 until nPackers) {
+            when (packerIOs(index).ColExtractor.fire) {
+                val mask = packerIOs(index).ColExtractor.bits.dataInValid.asUInt
+                packerDuplicateMask(index) := packerDuplicateMask(index) | (packerPackedMask(index) & mask)
+                packerPackedMask(index) := packerPackedMask(index) | mask
+                packerObservedBytes(index) := packerObservedBytes(index) +
+                    (PopCount(mask) << packerIOs(index).ColExtractor.bits.dataSize)
+                packerLastPackedAt(index) := diagnosticCycle
+            }
+            when (packerIOs(index).Trapper.fire) {
+                packerPackedMask(index) := 0.U
+                packerDuplicateMask(index) := 0.U
+                packerObservedBytes(index) := 0.U
+            }
+        }
+
+        // Print once after approximately 2^10 cycles without progress while a packer is owned.
+        val packerStallCycles = RegInit(0.U(10.W))
+        val packerWork = currentlyPacking.asUInt.orR
+        when (!packerWork || io.FetchUnitPort.fire || io.TrapperPort.fire) {
+            packerStallCycles := 0.U
+        }.elsewhen (!packerStallCycles.andR) {
+            packerStallCycles := packerStallCycles + 1.U
+        }
+        val packerStallSnapshot = packerWork && !io.FetchUnitPort.fire && !io.TrapperPort.fire &&
+              packerStallCycles === ((1 << 10) - 2).U
+        when (packerStallSnapshot) {
+            SynthesizePrintf(
+                "[DTU STALL packers] used=0x%x bases=0x%x extractorReady=0x%x complete=0x%x trapReady=%d inValid=%d inBase=%d count=%d t=%d\n",
+                currentlyPacking.asUInt, BaseReqSrc.asUInt,
+                VecInit(colExtractorIOs.map(_.CtrlUnit.ready)).asUInt,
+                VecInit(packerIOs.map(_.Trapper.valid)).asUInt,
+                io.TrapperPort.ready, io.FetchUnitPort.valid, baseIDFromDesc, nPackers.U, diagnosticCycle)
+        }
+
+        val packerDumpActive = RegInit(false.B)
+        val packerDumpIndex = RegInit(0.U(log2Ceil(nPackers).W))
+        when (!packerWork || io.FetchUnitPort.fire || io.TrapperPort.fire) {
+            packerDumpActive := false.B
+        }.elsewhen (packerStallSnapshot) {
+            packerDumpActive := true.B; packerDumpIndex := 0.U
+        }.elsewhen (packerDumpActive) {
+            when (packerDumpIndex === (nPackers - 1).U) { packerDumpActive := false.B
+            }.otherwise { packerDumpIndex := packerDumpIndex + 1.U }
+        }
+        val ownedByConfig = PopCount((0 until nPackers).map { j =>
+            currentlyPacking(j) && packerConfig(j) === packerConfig(packerDumpIndex)
+        })
+        when (packerDumpActive && !io.FetchUnitPort.fire && !io.TrapperPort.fire && currentlyPacking(packerDumpIndex)) {
+            SynthesizePrintf(
+                "[DTU STALL packer] slot=%d base=%d cfg=%d cfgOwned=%d allocT=%d inputT=%d packedT=%d delivered=0x%x packed=0x%x duplicates=0x%x bytes=%d extractorVR=0x%x complete=%d\n",
+                packerDumpIndex, BaseReqSrc(packerDumpIndex), packerConfig(packerDumpIndex), ownedByConfig,
+                packerAllocatedAt(packerDumpIndex), packerLastInputAt(packerDumpIndex), packerLastPackedAt(packerDumpIndex),
+                packerDeliveredMask(packerDumpIndex), packerPackedMask(packerDumpIndex), packerDuplicateMask(packerDumpIndex),
+                packerObservedBytes(packerDumpIndex),
+                Cat(packerIOs(packerDumpIndex).ColExtractor.valid, packerIOs(packerDumpIndex).ColExtractor.ready),
+                packerIOs(packerDumpIndex).Trapper.valid)
+        }
 
         val packerOutVec = VecInit(packerIOs.map(_.Trapper))
         val to_trapper_arb = Module(new RRArbiter(new PackerTrapperIO(inMaxID), nPackers))

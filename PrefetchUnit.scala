@@ -365,7 +365,7 @@ class PreFetchUnitRME(params: RelMemParams, tlInEdge : TLEdge, tlOutEdge: TLEdge
     // When new injection request
     when (io.Requestor.InjectionRequest.valid)
     {
-       SynthesizePrintf("InjectionRequest.valid 0x%x\n", io.Requestor.InjectionRequest.bits.RequestAddr)
+//        SynthesizePrintf("InjectionRequest.valid 0x%x\n", io.Requestor.InjectionRequest.bits.RequestAddr)
         /*
             States:
                 1. Data is available
@@ -407,7 +407,7 @@ class PreFetchUnitRME(params: RelMemParams, tlInEdge : TLEdge, tlOutEdge: TLEdge
             when(isPresentDataCache)
             {
               val data = InjectionPacketAsWords(injectionPackets(dataCacheIdx))(io.Requestor.InjectionRequest.bits.InjectionReqNum)
-              SynthesizePrintf("isPresentDataCache %d 0x%x\n", io.Requestor.InjectionRequest.bits.InjectionReqNum, data)
+//               SynthesizePrintf("isPresentDataCache %d 0x%x\n", io.Requestor.InjectionRequest.bits.InjectionReqNum, data)
 
               io.Requestor.InjectionRequest.ready := true.B
               io.Requestor.Injection.bits := data

@@ -65,7 +65,7 @@ class PackerRME(params : RelMemParams, inMaxID: Int, outmaxID : Int, nExtraction
     baseReqSrc := io.ColExtractor.bits.descriptorIn.baseID
     val DataSize =  io.ColExtractor.bits.dataSize
 
-    SynthesizePrintf("DataSize %d -- %d -- %d\n", DataSize,  bytesIn,  io.ColExtractor.bits.dataInValid.asUInt)
+//     SynthesizePrintf("DataSize %d -- %d -- %d\n", DataSize,  bytesIn,  io.ColExtractor.bits.dataInValid.asUInt)
     (0 until nExtractionDesc).foreach{j =>
         val writeBytes = Wire(Vec(8, UInt(8.W))) // max 8 bytes
         for (i <- 0 until 8) {
@@ -112,7 +112,7 @@ class PackerRME(params : RelMemParams, inMaxID: Int, outmaxID : Int, nExtraction
                     }
                 }
 
-                SynthesizePrintf("[Packer%d] WriteBytes %d\n", j.U, writeBytes.asUInt)
+//                 SynthesizePrintf("[Packer%d] WriteBytes %d\n", j.U, writeBytes.asUInt)
             }
             is (3.U)
             {
@@ -148,7 +148,7 @@ class PackerRME(params : RelMemParams, inMaxID: Int, outmaxID : Int, nExtraction
 
     when ((NumPackedBytes > 0.U))
     {
-        SynthesizePrintf("NumPacked %d\n", NumPackedBytes)
+//         SynthesizePrintf("NumPacked %d\n", NumPackedBytes)
     }
 
     //val active :: clear :: Nil = Enum(2)
