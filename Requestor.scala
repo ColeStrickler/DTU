@@ -6,7 +6,6 @@ import freechips.rocketchip.diplomacy._
 import freechips.rocketchip.tilelink._
 import freechips.rocketchip.tilelink.TLBundleA
 import freechips.rocketchip.regmapper._
-import midas.targetutils.SynthesizePrintf
 import org.chipsalliance.cde.config.{Parameters, Field, Config}
 import freechips.rocketchip.diplomacy.BufferParams.flow
 import _root_.subsystem.rme.IDAllocator
@@ -77,22 +76,6 @@ case class RequestorAGUPort(bitwidth : Int = 32) extends Bundle
 
 
 
-// Read-only state exported to one shared, stall-triggered diagnostic site.
-class RequestorDiagnostic(tlParams: TLBundleParameters) extends Bundle {
-    val active = Bool()
-    val requestCount = UInt(5.W) // sixteen-entry input queue
-    val outputCount = UInt(5.W)  // sixteen-entry descriptor queue
-    val baseSource = UInt(tlParams.sourceBits.W)
-    val baseAddress = UInt(tlParams.addressBits.W)
-    val descriptorsSent = UInt(8.W)
-    val descriptorsNeeded = UInt(8.W)
-    val initVR = UInt(2.W)
-    val aguVR = UInt(2.W)
-    val fetchVR = UInt(2.W)
-    val started = Valid(UInt(tlParams.sourceBits.W))
-    val generated = Valid(UInt(tlParams.sourceBits.W))
-}
-
 class RequestorRME(params: RelMemParams, tlInEdge : TLEdge, tlOutEdge: TLEdge, tlOutBundle: TLBundle, config: Int)(
     implicit p: Parameters) extends Module{
         val tlOutParams = tlOutEdge.bundle
@@ -126,7 +109,6 @@ class RequestorRME(params: RelMemParams, tlInEdge : TLEdge, tlOutEdge: TLEdge, t
             val Trapper = Flipped(RequestorTrapperPort(tlInParams, params))
 
             val agu = new RequestorAGUPort(maxRMEOffsetBitWidth)
-            val Diagnostic = Output(new RequestorDiagnostic(tlInParams))
 
         }).suggestName(s"requestorio_$config")
 
@@ -208,22 +190,6 @@ class RequestorRME(params: RelMemParams, tlInEdge : TLEdge, tlOutEdge: TLEdge, t
         
         //val col = RegInit(0.U(log2Ceil(512 + 1).W))
         val busWidth = 8.U(7.W)
-
-        io.Diagnostic.active := stateReg === active
-        io.Diagnostic.requestCount := requestQueue.io.count
-        io.Diagnostic.outputCount := outQueue.io.count
-        io.Diagnostic.baseSource := baseRequest.source
-        io.Diagnostic.baseAddress := baseRequest.address
-        io.Diagnostic.descriptorsSent := nDescriptorsSent
-        io.Diagnostic.descriptorsNeeded := nDescriptors
-        io.Diagnostic.initVR := Cat(io.agu.offsetAddrFromBase.valid, io.agu.offsetAddrFromBase.ready)
-        io.Diagnostic.aguVR := Cat(io.agu.offset.valid, io.agu.offset.ready)
-        io.Diagnostic.fetchVR := Cat(io.FetchUnit.valid, io.FetchUnit.ready)
-        io.Diagnostic.started.valid := requestQueue.io.deq.fire
-        io.Diagnostic.started.bits := requestQueue.io.deq.bits.BaseRequest.source
-        io.Diagnostic.generated.valid := stateReg === active &&
-            nDescriptorsSent === nDescriptors - 1.U && outQueue.io.enq.fire
-        io.Diagnostic.generated.bits := baseRequest.source
 
         /* 
             Defaults

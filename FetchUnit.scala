@@ -6,7 +6,6 @@ import freechips.rocketchip.diplomacy._
 import freechips.rocketchip.tilelink._
 import freechips.rocketchip.tilelink.TLBundleA
 import freechips.rocketchip.regmapper._
-import midas.targetutils.SynthesizePrintf
 import org.chipsalliance.cde.config.{Parameters, Field, Config}
 import freechips.rocketchip.diplomacy.BufferParams.flow
 
@@ -53,7 +52,6 @@ case class FetchUnitIO(tlInParams: TLBundleParameters, tlOutParams: TLBundlePara
 
         // LLC Port
         val IncomingReqInCache = Input(Bool())
-        val DiagnosticStall = Output(Bool())
         val LLCOutReq = Decoupled(new TLBundleA(toCacheParams)) // send outbound memory requests to DRAM
         val LLCInReply = Flipped(Decoupled(new TLBundleD(toCacheParams))) // receive inbound data from DRAM
 
@@ -95,11 +93,8 @@ class FetchUnitRME(params: RelMemParams, adapter: TLAdapterNode, cachedRegionEdg
         val beatWidth = 8
         val dataRegWidth = (math.pow(2, params.maxDataSize+1)).toInt * beatWidth // this should give us the extra byte we need to extract excesses
         val srcID = (outMaxID - subInstance).U
-        println(s"inMaxID $inMaxID outMaxID $outMaxID using SrCID ${outMaxID - subInstance}")
-        println(s"dataRegWidth $dataRegWidth")
         val io = IO(new FetchUnitIO(tlInParams, tlOutParams, inMaxID, outMaxID, dataRegWidth, toCacheTLParams, params)).suggestName(s"fetchunitio_$instance-$subInstance")
 
-        println(s"\n\n\nout data width ${io.OutReq.bits.data.getWidth}\n\n\n")
         io.OutReq.valid := false.B
         io.OutReq.bits := 0.U.asTypeOf(new TLBundleA(tlOutParams))
 
@@ -150,24 +145,11 @@ class FetchUnitRME(params: RelMemParams, adapter: TLAdapterNode, cachedRegionEdg
             Store information on outbound requests here
         */
         val requestTable = RegInit(VecInit(Seq.fill(params.nFetchUnits)(emptyEntry)))
-        // Diagnostic bookkeeping only; these bits never control request admission or routing.
-        val requestIssuedDiagnostic = RegInit(VecInit(Seq.fill(params.nFetchUnits)(false.B)))
-        val requestLLCDiagnostic = RegInit(VecInit(Seq.fill(params.nFetchUnits)(false.B)))
-        val diagnosticCycle = RegInit(0.U(48.W)); diagnosticCycle := diagnosticCycle + 1.U
-        val nextIssueOrder = RegInit(1.U(32.W))
-        val requestIssueOrderDiagnostic = RegInit(VecInit(Seq.fill(params.nFetchUnits)(0.U(32.W))))
-        val requestIssuedAtDiagnostic = RegInit(VecInit(Seq.fill(params.nFetchUnits)(0.U(48.W))))
-        val requestRxStartedDiagnostic = RegInit(VecInit(Seq.fill(params.nFetchUnits)(false.B)))
-        val requestRxDoneDiagnostic = RegInit(VecInit(Seq.fill(params.nFetchUnits)(false.B)))
-        val requestRxFirstAtDiagnostic = RegInit(VecInit(Seq.fill(params.nFetchUnits)(0.U(48.W))))
-        val requestRxLastAtDiagnostic = RegInit(VecInit(Seq.fill(params.nFetchUnits)(0.U(48.W))))
         // HELPER FUNCTIONS 
 
 
         def ResetEntry(entry: UInt) : Unit = {
             requestTable(entry) := emptyEntry
-            requestIssuedDiagnostic(entry) := false.B
-            requestLLCDiagnostic(entry) := false.B
         }
 
 
@@ -214,14 +196,6 @@ class FetchUnitRME(params: RelMemParams, adapter: TLAdapterNode, cachedRegionEdg
             reqTableEntry.extractionDescriptorsValid(pos) := true.B
             reqTableEntry.active := true.B
             requestTable(entry) := reqTableEntry
-            requestIssuedDiagnostic(entry) := false.B
-            requestLLCDiagnostic(entry) := false.B
-            requestIssueOrderDiagnostic(entry) := 0.U
-            requestIssuedAtDiagnostic(entry) := 0.U
-            requestRxStartedDiagnostic(entry) := false.B
-            requestRxDoneDiagnostic(entry) := false.B
-            requestRxFirstAtDiagnostic(entry) := 0.U
-            requestRxLastAtDiagnostic(entry) := 0.U
         }
 
 
@@ -277,8 +251,6 @@ class FetchUnitRME(params: RelMemParams, adapter: TLAdapterNode, cachedRegionEdg
         }
 
 
-        println(s"(FetchUnit) MASK ${new TLBundleA(tlOutParams).mask.getWidth}")
-        println(s"(FetchUnit) DATA ${new TLBundleA(tlOutParams).data.getWidth}")
 
         /*
             When we have an incoming request we have 3 options:
@@ -407,35 +379,6 @@ class FetchUnitRME(params: RelMemParams, adapter: TLAdapterNode, cachedRegionEdg
  // )
         }
 
-        // Show the exact request which reaches the cache-facing TileLink edge.
-        // Print a legal request only when it handshakes, and print an illegal
-        // request once even if it remains valid while the receiver is blocked.
-        val (llcOutLegal, _) = toCacheOutTLInEdge.Get(
-            fromSource = io.LLCOutReq.bits.source,
-            toAddress = io.LLCOutReq.bits.address,
-            lgSize = io.LLCOutReq.bits.size)
-        val illegalLLCPrinted = RegInit(false.B)
-        when (!io.LLCOutReq.valid || llcOutLegal) {
-            illegalLLCPrinted := false.B
-        }
-        when (io.LLCOutReq.fire) {
-//             SynthesizePrintf(
-//                 "[DTU-TRACE fetch-llc] addr=0x%x size=%d source=%d legal=%d\n",
-//                 io.LLCOutReq.bits.address,
-//                 io.LLCOutReq.bits.size,
-//                 io.LLCOutReq.bits.source,
-//                 llcOutLegal)
-        }
-        when (io.LLCOutReq.valid && !llcOutLegal && !illegalLLCPrinted) {
-            SynthesizePrintf(
-                "[DTU-TRACE ILLEGAL fetch-llc] addr=0x%x size=%d source=%d ready=%d\n",
-                io.LLCOutReq.bits.address,
-                io.LLCOutReq.bits.size,
-                io.LLCOutReq.bits.source,
-                io.LLCOutReq.ready)
-            illegalLLCPrinted := true.B
-        }
-
         val (d_first, d_last, d_done, _, d_count) = tlOutEdge.firstlast2(io.inReply)
         val (d_first_cache, d_last_cache, d_done_cache, _, d_count_cache) = tlOutEdge.firstlast2(io.LLCInReply)
 
@@ -546,122 +489,6 @@ class FetchUnitRME(params: RelMemParams, adapter: TLAdapterNode, cachedRegionEdg
         //    //SynthesizePrintf("(FetchUnit) FROM LLC VALID\n")
         //}
 
-
-        when (io.OutReq.fire || io.LLCOutReq.fire) {
-            requestIssuedDiagnostic(outReqEntryToSend) := true.B
-            requestLLCDiagnostic(outReqEntryToSend) := io.LLCOutReq.fire
-            requestIssueOrderDiagnostic(outReqEntryToSend) := nextIssueOrder
-            nextIssueOrder := nextIssueOrder + 1.U
-            requestIssuedAtDiagnostic(outReqEntryToSend) := diagnosticCycle
-        }
-
-        // First/last accepted reply beats, independent of later buffer delivery.
-        val diagnosticDRAMHeadSlot = (outMaxID.U - io.inReply.bits.source)(log2Ceil(params.nFetchUnits) - 1, 0)
-        val diagnosticLLCHeadSlot = io.LLCInReply.bits.source(log2Ceil(params.nFetchUnits) - 1, 0)
-        val dramReplySlot = Mux(d_first, diagnosticDRAMHeadSlot, receivingEntry)
-        val llcReplySlot = Mux(d_first_cache, diagnosticLLCHeadSlot, receivingEntry2)
-        for ((port, first, last, slot) <- Seq(
-            (io.inReply, d_first, d_last, dramReplySlot),
-            (io.LLCInReply, d_first_cache, d_last_cache, llcReplySlot))) {
-            when (port.fire && first) {
-                requestRxStartedDiagnostic(slot) := true.B
-                requestRxFirstAtDiagnostic(slot) := diagnosticCycle
-            }
-            when (port.fire && last) {
-                requestRxDoneDiagnostic(slot) := true.B
-                requestRxLastAtDiagnostic(slot) := diagnosticCycle
-            }
-        }
-
-        // Keep the diagnostic narrow: IDs/addresses/control bits, never data lines.
-        val responseStallCycles = RegInit(0.U(10.W))
-        val activeRequests = VecInit(requestTable.map(_.active)).asUInt
-        val responseWork = activeRequests.orR || hasOutReqToSend || dataRegFull || dataReg2Full
-        when (!responseWork || outputFire) {
-            responseStallCycles := 0.U
-        }.elsewhen (!responseStallCycles.andR) {
-            responseStallCycles := responseStallCycles + 1.U
-        }
-        val responseStallSnapshot = responseWork && !outputFire &&
-            responseStallCycles === ((1 << 10) - 2).U
-        io.DiagnosticStall := responseStallSnapshot
-        val history = Module(new DTUFetchHistory(params.nFetchUnits,
-            math.max(tlInParams.sourceBits, tlOutParams.sourceBits), log2Ceil(params.maxConfigs)))
-        history.io.snapshot := responseStallSnapshot
-        history.io.progress := !responseWork || outputFire
-        def traceEvent(lane: Int, valid: Bool, slot: UInt, llc: Bool,
-                       source: UInt, edge: UInt, order: UInt): Unit = {
-            val event = history.io.events(lane)
-            val desc = requestTable(slot).descriptor
-            event.valid := valid
-            event.bits.llc := llc; event.bits.slot := slot; event.bits.source := source
-            event.bits.order := order; event.bits.config := desc.config
-            event.bits.dst := desc.dst.asUInt; event.bits.base := desc.baseID
-            event.bits.place := desc.requestPlacement; event.bits.addr := desc.addr
-            event.bits.edge := edge
-        }
-        traceEvent(0, io.OutReq.fire || io.LLCOutReq.fire, outReqEntryToSend,
-            io.LLCOutReq.fire, Mux(io.LLCOutReq.fire, io.LLCOutReq.bits.source, io.OutReq.bits.source),
-            0.U, nextIssueOrder)
-        traceEvent(1, io.inReply.fire && (d_first || d_last), dramReplySlot,
-            false.B, io.inReply.bits.source, Cat(d_last, d_first), requestIssueOrderDiagnostic(dramReplySlot))
-        traceEvent(2, io.LLCInReply.fire && (d_first_cache || d_last_cache), llcReplySlot,
-            true.B, io.LLCInReply.bits.source, Cat(d_last_cache, d_first_cache), requestIssueOrderDiagnostic(llcReplySlot))
-        val deliveredSlot = Mux(selectDRAM, receivingEntry, receivingEntry2)
-        traceEvent(3, outputFire, deliveredSlot, !selectDRAM,
-            Mux(selectDRAM, outMaxID.U - receivingEntry, receivingEntry2),
-            0.U, requestIssueOrderDiagnostic(deliveredSlot))
-        when (responseStallSnapshot) {
-            SynthesizePrintf(
-                "[DTU STALL fetch] active=0x%x pending=%d outAddr=0x%x outV=0x%x outR=0x%x full=0x%x can=0x%x dst=0x%x dBase=%d lBase=%d dAddr=0x%x lAddr=0x%x inV=0x%x inR=0x%x dSrc=%d lSrc=%d dRemain=%d lRemain=%d dRx=%d lRx=%d t=%d nextOrder=%d dHeadBase=%d dHeadCfg=%d dHeadOrder=%d\n",
-                activeRequests, hasOutReqToSend,
-                requestTable(outReqEntryToSend).descriptor.addr,
-                Cat(io.LLCOutReq.valid, io.OutReq.valid),
-                Cat(io.LLCOutReq.ready, io.OutReq.ready),
-                Cat(dataReg2Full, dataRegFull), Cat(llcCanAdvance, dramCanAdvance),
-                Cat(llcEntry.descriptor.dst.asUInt, dramEntry.descriptor.dst.asUInt),
-                dramEntry.descriptor.baseID, llcEntry.descriptor.baseID,
-                dramEntry.descriptor.addr, llcEntry.descriptor.addr,
-                Cat(io.LLCInReply.valid, io.inReply.valid),
-                Cat(io.LLCInReply.ready, io.inReply.ready),
-                io.inReply.bits.source, io.LLCInReply.bits.source,
-                d_count, d_count_cache, receivingEntry, receivingEntry2,
-                diagnosticCycle, nextIssueOrder,
-                requestTable(diagnosticDRAMHeadSlot).descriptor.baseID,
-                requestTable(diagnosticDRAMHeadSlot).descriptor.config,
-                requestIssueOrderDiagnostic(diagnosticDRAMHeadSlot))
-        }
-
-        // One bounded pass, one shared print site, rather than a site per table slot.
-        // This is a live scan during the same stall, not an atomic copy of the table.
-        val tableDumpActive = RegInit(false.B)
-        val tableDumpIndex = RegInit(0.U(log2Ceil(params.nFetchUnits).W))
-        when (!responseWork || outputFire) {
-            tableDumpActive := false.B
-        }.elsewhen (responseStallSnapshot) {
-            tableDumpActive := true.B
-            tableDumpIndex := 0.U
-        }.elsewhen (tableDumpActive) {
-            when (tableDumpIndex === (params.nFetchUnits - 1).U) {
-                tableDumpActive := false.B
-            }.otherwise {
-                tableDumpIndex := tableDumpIndex + 1.U
-            }
-        }
-        val dumpEntry = requestTable(tableDumpIndex)
-        val dumpLLC = requestLLCDiagnostic(tableDumpIndex)
-        val dumpSource = Mux(dumpLLC, tableDumpIndex, outMaxID.U - tableDumpIndex)
-        when (tableDumpActive && responseWork && !outputFire && dumpEntry.active) {
-            SynthesizePrintf(
-                "[DTU STALL entry] slot=%d issued=%d llc=%d src=%d cfg=%d dst=%d base=%d place=%d addr=0x%x extracts=0x%x order=%d issueT=%d rxStarted=%d firstT=%d rxDone=%d lastT=%d\n",
-                tableDumpIndex, requestIssuedDiagnostic(tableDumpIndex), dumpLLC,
-                dumpSource, dumpEntry.descriptor.config, dumpEntry.descriptor.dst.asUInt,
-                dumpEntry.descriptor.baseID, dumpEntry.descriptor.requestPlacement,
-                dumpEntry.descriptor.addr, dumpEntry.extractionDescriptorsValid.asUInt,
-                requestIssueOrderDiagnostic(tableDumpIndex), requestIssuedAtDiagnostic(tableDumpIndex),
-                requestRxStartedDiagnostic(tableDumpIndex), requestRxFirstAtDiagnostic(tableDumpIndex),
-                requestRxDoneDiagnostic(tableDumpIndex), requestRxLastAtDiagnostic(tableDumpIndex))
-        }
 
         when (io.ControlUnit.fire || io.Prefetch.ToPre.fire)
         {

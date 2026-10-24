@@ -7,7 +7,6 @@ import freechips.rocketchip.tilelink._
 import freechips.rocketchip.tilelink.TLBundleA
 import freechips.rocketchip.regmapper._
 import freechips.rocketchip
-import midas.targetutils.SynthesizePrintf
 import org.chipsalliance.cde.config.{Parameters, Field, Config}
 import freechips.rocketchip.diplomacy.BufferParams.flow
 import freechips.rocketchip.tilelink.TLMessages.AccessAck
@@ -38,7 +37,6 @@ class IDAllocator(minID : Int, maxID : Int) extends Module {
 
   val initDone = RegInit(false.B)
   val IDValues = VecInit((minID to maxID).map(i => i.U))
-  println(f"IDAllocator allocating { ${minID} to ${maxID} }\n")
 
 
   val initCounter = RegInit(0.U(log2Ceil(queue_depth).W))
@@ -138,7 +136,6 @@ class ConditionalDemuxD(params: TLBundleParameters) extends Module {
   })
 
 
-  println(s"CondtionalDemuxD ${io.dataIn.bits.data.getWidth},${io.outA.bits.data.getWidth},${io.outB.bits.data.getWidth}\n")
   // Default both outputs to zero
   val readyOther = Reg(Bool()) // so we have somewhere to connect it to
 
@@ -323,7 +320,6 @@ class DTUUncachedRegion(implicit p: Parameters) extends LazyModule {
     id := id_allocator.io.newID.bits
   }
 
-  println(s"inTL.A.params ${inTL.params}, outTL.a.params ${outTL.params}")
   
 
   id_allocator.io.retireID.valid := outTL.d.fire
@@ -430,7 +426,6 @@ class NTStoreRegion(implicit p: Parameters) extends LazyModule {
       id := id_allocator.io.newID.bits
     }
 
-    println(s"inTL.A.params ${inTL.params}, outTL.a.params ${outTL.params}")
     
     id_allocator.io.retireID.valid := outTL.d.fire
     id_allocator.io.retireID.bits := id
@@ -573,7 +568,6 @@ class DTUCachedRegionManager(implicit p: Parameters) extends LazyModule {
   val beatBytes = 8
   val maxDRAM = math.pow(2, 33).toLong
   val addr = AddressSet.misaligned(maxDRAM, (BigInt(1) << 47) - maxDRAM)
-  println(addr)
   val node = TLManagerNode(Seq(TLSlavePortParameters.v1(Seq(TLManagerParameters(
     address = addr,
     resources = device.reg,

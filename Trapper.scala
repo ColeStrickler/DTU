@@ -7,7 +7,6 @@ import freechips.rocketchip.tilelink._
 import freechips.rocketchip.tilelink.TLBundleA
 import freechips.rocketchip.regmapper._
 import freechips.rocketchip
-import midas.targetutils.SynthesizePrintf
 import org.chipsalliance.cde.config.{Parameters, Field, Config}
 import freechips.rocketchip.diplomacy.BufferParams.flow
 import freechips.rocketchip.tilelink.TLMessages.AccessAck
@@ -89,7 +88,6 @@ class TrapperRME(params: RelMemParams, tlInEdge: TLEdgeIn, tlOutEdge: TLEdgeOut,
         val ControlUnit = Flipped(DecoupledIO(ControlUnitTrapperPort(tlInParams, inMaxID)))
 
     }).suggestName(s"trapper_$instance")
-    println(s"SourceBits ${io.TLInA.bits.source.getWidth}")    
         
     val ticket_dispenser = RegInit(0.U(16.W))
     ticket_dispenser := Mux(io.TLInA.fire, ticket_dispenser + 1.U, ticket_dispenser)
@@ -161,7 +159,6 @@ class TrapperRME(params: RelMemParams, tlInEdge: TLEdgeIn, tlOutEdge: TLEdgeOut,
          
 
 
-        println("TLBundleD size bits %d\n", tlInParams.sizeBits)
         val dataChanSize = tlInEdge.size(tlInBundle.d.bits)
         val currentRequest = Wire(Decoupled(new TLBundleD(tlInParams)))
         val (d_first, d_last, d_done, beatCount, count) = tlInEdge.firstlast2(currentRequest)
