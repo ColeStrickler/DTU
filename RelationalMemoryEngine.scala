@@ -77,7 +77,7 @@ class RME(params: RelMemParams)(implicit p: Parameters) extends LazyModule
   //val mdev = new MemoryDevice with HasReservedAddressRange
   
 
-  val beatBytes = 16
+  val beatBytes = 32
   val maxDRAM = math.pow(2, 33).toLong
   val addr2 = AddressSet.misaligned(maxDRAM, (BigInt(1) << 47) - maxDRAM)
   // ResourceBinding {
@@ -161,6 +161,7 @@ class RME(params: RelMemParams)(implicit p: Parameters) extends LazyModule
         val perfDTU = RegInit(0.U(64.W)) // track total DTU requests
         val perfNonDTU = RegInit(0.U(64.W)) // track normal memory requests
         val perfPrefetchUnit = RegInit(0.U(64.W)) // track prefetch unit traffic
+        val perfLLCPort = RegInit(0.U(64.W))
 
 
 
@@ -251,11 +252,13 @@ class RME(params: RelMemParams)(implicit p: Parameters) extends LazyModule
       val dtu_access_reg = Seq((0xf00) -> Seq(RegField(perfDTU.getWidth, perfDTU, RegFieldDesc("perfDTU", "perfDTU"))))
       val nondtu_access_reg = Seq((0xf08) -> Seq(RegField(perfNonDTU.getWidth, perfNonDTU, RegFieldDesc("perfNonDTUl", "perfNonDTU"))))
       val prefetch_access_reg = Seq((0xf10) -> Seq(RegField(perfPrefetchUnit.getWidth, perfPrefetchUnit, RegFieldDesc("perfPreDTU", "perfPreDTU"))))
+      val llcport_access_reg = Seq((0xf18) -> Seq(RegField(perfLLCPort.getWidth, perfLLCPort, RegFieldDesc("perfLLCPort", "perfLLCPort"))))
+
 
 
       val mmreg = mmio_Enable ++ mmio_RowSize ++ mmio_RowCount ++ mmio_EnabledColumnCount ++ 
                   mmio_ColumnWidth ++ mmio_ColumnOffsets ++ mmio_FrameOffset ++ mmio_Reset ++ perfCounters ++
-                  mmio_EphemeralConfigStart ++ mmio_EphemeralConfigSize ++ mmio_EphemeralRegionConfig_PhysStart ++ dtu_access_reg ++ nondtu_access_reg
+                  mmio_EphemeralConfigStart ++ mmio_EphemeralConfigSize ++ mmio_EphemeralRegionConfig_PhysStart ++ dtu_access_reg ++ nondtu_access_reg ++ prefetch_access_reg ++ llcport_access_reg
       val regmap = ctlnode.regmap(mmreg: _*)
       mmreg.foreach { case (addr, fields) =>
           //  println(f"DTU MMIO reg @ 0x$addr%x : ${fields.map(_.desc.get.name).mkString(", ")}")
@@ -575,7 +578,7 @@ class RME(params: RelMemParams)(implicit p: Parameters) extends LazyModule
       fetch_unit.io.LLCInReply <> toLLC.d
       when (toLLC.a.fire)
       {
-        //SynthesizePrintf("TO LLC FROM MAIN addr 0x%x SRC=%d\n", toLLC.a.bits.address, toLLC.a.bits.source)
+         perfLLCPort := 1.U + perfLLCPort
       }
 
     control_unit.io.FetchUnitPort <> fetch_unit.io.ControlUnit

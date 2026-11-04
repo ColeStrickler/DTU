@@ -380,7 +380,7 @@ class FetchUnitRME(params: RelMemParams, adapter: TLAdapterNode, cachedRegionEdg
         }
 
         val (d_first, d_last, d_done, _, d_count) = tlOutEdge.firstlast2(io.inReply)
-        val (d_first_cache, d_last_cache, d_done_cache, _, d_count_cache) = tlOutEdge.firstlast2(io.LLCInReply)
+        val (d_first_cache, d_last_cache, d_done_cache, _, d_count_cache) = toCacheOutTLInEdge.firstlast2(io.LLCInReply)
 
         io.inReply.ready := false.B
        // io.LLCInReply.ready := false.B
@@ -389,7 +389,9 @@ class FetchUnitRME(params: RelMemParams, adapter: TLAdapterNode, cachedRegionEdg
         val DRAMInReplyActive  = RegInit(false.B)
         val LLCInReplyActive = RegInit(false.B)
 
-        io.inReply.ready := !dataRegFull  // can not receive more replies until we have done something with current data
+        val dramDrained = Wire(Bool())
+        // Accept the next line's first beat while forwarding the buffered line.
+        io.inReply.ready := !dataRegFull || dramDrained
         io.LLCInReply.ready := !dataReg2Full 
 
         when (io.inReply.fire) {
@@ -433,6 +435,7 @@ class FetchUnitRME(params: RelMemParams, adapter: TLAdapterNode, cachedRegionEdg
         val hasFullData = dramEligible || llcEligible
         val fullDataToSend = Mux(selectDRAM, dataReg, dataReg2)
         val outputFire = io.Prefetch.ToPre.fire || io.ControlUnit.fire
+        dramDrained := outputFire && selectDRAM
 
         // Retire only the buffer selected by the response arbiter.
         when (outputFire) {
@@ -446,11 +449,8 @@ class FetchUnitRME(params: RelMemParams, adapter: TLAdapterNode, cachedRegionEdg
         )
 
         dataReg := Mux(io.inReply.fire, Cat(shiftNewData, (dataReg >> dataWidth)((dataReg.getWidth - 1)-dataWidth, 0)), dataReg)
-        dataRegFull := Mux(
-            dataRegFull,
-            !(outputFire && selectDRAM),
-            d_last && io.inReply.fire
-        )
+        dataRegFull := (dataRegFull && !dramDrained) ||
+            (d_last && io.inReply.fire)
 
         io.ControlUnit.valid := hasFullData && currTableEntry.descriptor.dst === DESTINATION.CONTROL_UNIT
         io.ControlUnit.bits.reqTableEntry := currTableEntry
@@ -461,33 +461,6 @@ class FetchUnitRME(params: RelMemParams, adapter: TLAdapterNode, cachedRegionEdg
         io.Prefetch.ToPre.bits.addr := currTableEntry.descriptor.addr
         io.Prefetch.ToPre.bits.data := fullDataToSend
 
-        when (io.LLCOutReq.fire)
-        {
-//             SynthesizePrintf("(FetchUnit) TO LLC\n")
-        }
-
-        when (io.LLCInReply.fire)
-        {
-//             SynthesizePrintf("(FetchUnit) FROM LLC 0x%x\n", io.LLCInReply.bits.data)
-        }
-
-
-        when (io.OutReq.fire)
-        {
-//             SynthesizePrintf("(FetchUnit) TO DRAM\n")
-        }
-
-        when (io.inReply.fire)
-        {
-//             SynthesizePrintf("(FetchUnit) FROM DRAM 0x%x\n", io.LLCInReply.bits.data)
-        }
-
-
-
-        //when (io.LLCInReply.valid)
-        //{
-        //    //SynthesizePrintf("(FetchUnit) FROM LLC VALID\n")
-        //}
 
 
         when (io.ControlUnit.fire || io.Prefetch.ToPre.fire)
@@ -500,15 +473,6 @@ class FetchUnitRME(params: RelMemParams, adapter: TLAdapterNode, cachedRegionEdg
                 ResetEntry(receivingEntry2)
             }
 
-            
-            when (io.ControlUnit.fire)
-            {
-           //     SynthesizePrintf("ToControlUnit: receiving entry %d, BaseReqSrc %d\n", receivingEntry, requestTable(receivingEntry).descriptor.dst.asUInt)
-            }
-            .otherwise
-            {
-               // SynthesizePrintf("ToPrefetchUnit: receiving entry %d, BaseReqSrc %d data 0x%x\n", receivingEntry, requestTable(receivingEntry).descriptor.dst.asUInt, dataReg)
-            }
         }
 }
 
