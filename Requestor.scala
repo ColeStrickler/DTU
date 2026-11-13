@@ -29,7 +29,7 @@ object DESTINATION extends ChiselEnum {
 
 case class RequestDescriptor(inMaxID:Int, outmaxID : Int, params: RelMemParams = RelMemParams()) extends Bundle
 {
-    val config = UInt(log2Ceil(params.maxConfigs).W)
+    val config = UInt(math.max(1, log2Ceil(params.maxConfigs)).W)
     val baseID = UInt(log2Ceil(inMaxID).W)
     val requestPlacement = UInt(7.W) // max of 64 places if we are doing 1 byte at a time selection
     val done  = Bool()
@@ -60,9 +60,9 @@ case class ExtractionDescriptor(minDataSize: Int) extends Bundle {
 }
 
 
-case class RequestorFetchUnitPort(inMaxID:Int, outmaxID : Int) extends Bundle
+case class RequestorFetchUnitPort(inMaxID:Int, outmaxID : Int, params: RelMemParams = RelMemParams()) extends Bundle
 {
-    val descriptor = Output(new RequestDescriptor(inMaxID, outmaxID))
+    val descriptor = Output(new RequestDescriptor(inMaxID, outmaxID, params))
     val extractionDescriptor = Output(new ExtractionDescriptor(4))
 }
 
@@ -94,7 +94,7 @@ class RequestorRME(params: RelMemParams, tlInEdge : TLEdge, tlOutEdge: TLEdge, t
 
         val io = IO(new Bundle {
             // Fetch Unit Port
-            val FetchUnit = Decoupled(new RequestorFetchUnitPort(inMaxID, outMaxID))
+            val FetchUnit = Decoupled(new RequestorFetchUnitPort(inMaxID, outMaxID, params))
             //val done = Output(Bool())
             //val FetchReq = Decoupled(Output(new TLBundleA(tlInParams)))
             //val isBaseRequest = Output(Bool())
@@ -133,7 +133,7 @@ class RequestorRME(params: RelMemParams, tlInEdge : TLEdge, tlOutEdge: TLEdge, t
         val active :: idle :: Nil = Enum(2)
         val stateReg = RegInit(idle)
         val requestQueue = Module(new Queue(TrapperReq(tlInParams, params), 16, flow=true))
-        val outQueue = Module(new Queue(new RequestorFetchUnitPort(inMaxID, outMaxID), 16, flow=false)) // prevent stalls
+        val outQueue = Module(new Queue(new RequestorFetchUnitPort(inMaxID, outMaxID, params), 16, flow=false)) // prevent stalls
         val baseRequest = Reg(new TLBundleA(tlInParams))
         val ModifiedRequestsSent = WireInit(true.B) // track if we have sent all the necessary requests
         val readyNextReq = Wire(Bool())
@@ -218,7 +218,7 @@ class RequestorRME(params: RelMemParams, tlInEdge : TLEdge, tlOutEdge: TLEdge, t
         
 
 
-        outQueue.io.enq.bits := 0.U.asTypeOf(new RequestorFetchUnitPort(inMaxID, outMaxID))
+        outQueue.io.enq.bits := 0.U.asTypeOf(new RequestorFetchUnitPort(inMaxID, outMaxID, params))
         outQueue.io.enq.valid := false.B
 
         io.FetchUnit.bits := outQueue.io.deq.bits
@@ -359,7 +359,7 @@ class RequestorRME(params: RelMemParams, tlInEdge : TLEdge, tlOutEdge: TLEdge, t
                 
 
                // id_allocator.io.newID.ready := outQueue.io.enq.ready && io.agu.offset.valid // we should then fire, claim id and advance
-                val descriptorOut = Wire(RequestDescriptor(inMaxID, outMaxID))
+                val descriptorOut = Wire(RequestDescriptor(inMaxID, outMaxID, params))
                 descriptorOut.baseID := baseRequest.source
                 descriptorOut.requestPlacement := nDescriptorsSent
                 descriptorOut.done := done

@@ -148,23 +148,23 @@ case class PrefetchUnitAGUIO(params: RelMemParams) extends Bundle {
 }
 
 
-case class PrefetchUnitFetchUnitPortIn() extends Bundle
+case class PrefetchUnitFetchUnitPortIn(params: RelMemParams = RelMemParams()) extends Bundle
 {
   val data = UInt(512.W) // 64 bytes = 1 cache line
   val addr = UInt(47.W) // will take out of the reqTableEntry
-  val config = UInt(4.W)
+  val config = UInt(math.max(1, log2Ceil(params.maxConfigs)).W)
 }
 
-case class PrefetchUnitFetchUnitPort(inMaxID:Int, outmaxID : Int) extends Bundle
+case class PrefetchUnitFetchUnitPort(inMaxID:Int, outmaxID : Int, params: RelMemParams = RelMemParams()) extends Bundle
 {
-  val ToFetchUnit = DecoupledIO(new RequestorFetchUnitPort(inMaxID, outmaxID))
-  val ToPre = Flipped(Decoupled(new PrefetchUnitFetchUnitPortIn()))
+  val ToFetchUnit = DecoupledIO(new RequestorFetchUnitPort(inMaxID, outmaxID, params))
+  val ToPre = Flipped(Decoupled(new PrefetchUnitFetchUnitPortIn(params)))
 }
 
-case class FetchUnitPrefetchUnitPort(inMaxID:Int, outmaxID : Int) extends Bundle
+case class FetchUnitPrefetchUnitPort(inMaxID:Int, outmaxID : Int, params: RelMemParams = RelMemParams()) extends Bundle
 {
-  //val ToFetchUnit = DecoupledIO(new RequestorFetchUnitPort(inMaxID, outmaxID))
-  val ToPre = Flipped(Decoupled(new PrefetchUnitFetchUnitPortIn()))
+  //val ToFetchUnit = DecoupledIO(new RequestorFetchUnitPort(inMaxID, outmaxID, params))
+  val ToPre = Flipped(Decoupled(new PrefetchUnitFetchUnitPortIn(params)))
 }
 
 
@@ -173,7 +173,7 @@ case class FetchUnitPrefetchUnitPort(inMaxID:Int, outmaxID : Int) extends Bundle
 
 case class PreFetchUnitIO(params: RelMemParams, inMaxID : Int, outmaxID : Int) extends Bundle {
     val Requestor = new PrefetchUnitAGUIO(params)
-    val FetchUnit = new PrefetchUnitFetchUnitPort(inMaxID, outmaxID)
+    val FetchUnit = new PrefetchUnitFetchUnitPort(inMaxID, outmaxID, params)
 }
 
 
@@ -184,15 +184,13 @@ case class PreFetchUnitIO(params: RelMemParams, inMaxID : Int, outmaxID : Int) e
     Track outbound requests
 */
 case class PrefetchOutboundTableEntry(params: RelMemParams) extends Bundle {
-    val address = UInt(log2Ceil(params.rmeAddressSize).W)
+    val address = UInt(47.W)
     val valid = Bool()
+    val sent = Bool()
+    val stale = Bool()
 }
 
 
-
-object DataState extends ChiselEnum {
-  val Available, Requested, NeedRequest = Value
-}
 
 class PreFetchUnitRME(params: RelMemParams, tlInEdge : TLEdge, tlOutEdge: TLEdge, tlOutBundle: TLBundle, config: Int)(
     implicit p: Parameters) extends Module
@@ -210,255 +208,140 @@ class PreFetchUnitRME(params: RelMemParams, tlInEdge : TLEdge, tlOutEdge: TLEdge
     
 
 
-    def InjectionPacketAsHalfWords(injectionPacket: UInt): Vec[UInt] = {
-        injectionPacket.asTypeOf(Vec(32, UInt(16.W)))
-    } 
-
-    def InjectionPacketAsWords(injectionPacket: UInt): Vec[UInt] = {
-        injectionPacket.asTypeOf(Vec(16, UInt(32.W)))
-    } 
-
-    
     val maxRMEOffsetBitWidth = log2Ceil(params.rmeAddressSize)
-
-    
     val nInjectionPackets = depthAhead * 2
+    val injectionPackets = RegInit(VecInit(Seq.fill(nInjectionPackets)(0.U(512.W))))
+    // Physical tags also distinguish metadata streams across reconfiguration.
+    val injectionPacketAddr = RegInit(VecInit(Seq.fill(nInjectionPackets)(0.U(47.W))))
+    val injectionPacketsValid = RegInit(VecInit(Seq.fill(nInjectionPackets)(false.B)))
+    val OldestInjectionPacket = RegInit(0.U(log2Ceil(nInjectionPackets).W))
+    val stream2PhysicalAddressStart = RegNext(io.Requestor.config_StreamPhysRegisters(0),
+      (params.rmeaddress + 0x08000000L).U(64.W))
 
-    val injectionPackets =
-      RegInit(VecInit(Seq.fill(nInjectionPackets)(0.U(512.W))))
+    val OutBoundReqTable = RegInit(VecInit(Seq.fill(nInjectionPackets)(
+      0.U.asTypeOf(new PrefetchOutboundTableEntry(params)))))
+    def pendingMatches(addr: UInt): Vec[Bool] =
+      VecInit(OutBoundReqTable.map(e => e.valid && e.address === addr))
+    def cachedMatches(addr: UInt): Vec[Bool] =
+      VecInit(injectionPacketAddr.zip(injectionPacketsValid).map {
+        case (tag, valid) => valid && tag === addr
+      })
 
-    val injectionPacketAddr =
-      RegInit(VecInit(Seq.fill(nInjectionPackets)(0.U(maxRMEOffsetBitWidth.W))))
-
-    val injectionPacketsValid =
-      RegInit(VecInit(Seq.fill(nInjectionPackets)(false.B)))
-    val stream2PhysicalAddressStart = RegInit((params.rmeaddress + 0x08000000L).U(47.W)) // pointed to the corresponding metadata stream start 
-    stream2PhysicalAddressStart := io.Requestor.config_StreamPhysRegisters(0)
-    def CheckRequestorReqPresentPacketTable(reqAddr: UInt): (Bool, UInt) = {
-    val matches = injectionPacketAddr.zip(injectionPacketsValid).map {
-      case (entryAddr, valid) =>
-        valid && entryAddr === reqAddr
+    // Track all requests from queue admission to response, including speculation.
+    // A configuration reset cancels queued requests but drains already issued ones.
+    val localReset = reset.asBool || io.Requestor.rst
+    val PrefetcherRME = withReset(localReset) {
+      Module(new SingleNextLinePrefetcherRME(
+        SingleNextLinePrefetcherParams(ahead=depthAhead, handleVA=true)))
     }
-
-    (matches.reduce(_ || _), PriorityEncoder(matches))
-  }
-
-
-
-
-
-
-
-    val OldestInjectionPacket = RegInit(0.U(log2Ceil(depthAhead*2).W))
-    def IncOldestInjectionPacket() : Unit = {
-        OldestInjectionPacket := Mux(OldestInjectionPacket === (depthAhead*2-1).U, 0.U, OldestInjectionPacket+1.U)
+    val DownstreamReqQueue = withReset(localReset) {
+      Module(new Queue(new RequestDescriptor(inMaxID, outMaxID, params), depthAhead, flow=false))
     }
-    def AllocateEntryInjectionPacketTable(data: UInt, addr: UInt) : Unit = {
-      injectionPackets(OldestInjectionPacket) := data
-      injectionPacketAddr(OldestInjectionPacket) := (addr-stream2PhysicalAddressStart)
-      injectionPacketsValid(OldestInjectionPacket) := true.B
-      IncOldestInjectionPacket()
-    }
-
-
-
-    val OutBoundReqTable =
-        RegInit(VecInit(Seq.fill(depthAhead*2)(
-            0.U.asTypeOf(new PrefetchOutboundTableEntry(params))
-        )))
-
-    def OutBoundReqMatchAddr(addr: UInt) : IndexedSeq[Bool] = {
-      OutBoundReqTable.map(e => (e.address === addr) && e.valid)
-    }
-
-    def CheckRequestReqPresentOutboundTable(addr: UInt): Bool = {
-            OutBoundReqMatchAddr(addr)
-                .reduce(_ || _)
-        }
-
-    
-    def AllocateTableEntry(addr: UInt) : Unit = {
-      val entryIdx = PriorityEncoder(OutBoundReqTable.map(!_.valid))
-      OutBoundReqTable(entryIdx).address := addr
-      OutBoundReqTable(entryIdx).valid := true.B
-    }
-
-    def FreeTableEntry(addr: UInt) : Unit = {
-      val entryIdx = PriorityEncoder(OutBoundReqMatchAddr(addr))
-      OutBoundReqTable(entryIdx).valid := false.B
-    }
-
+    val RequestQueueArb = Module(new RRArbiter(
+      new RequestDescriptor(inMaxID, outMaxID, params), 2))
 
     def MakeReqDescriptor(addr: UInt): RequestDescriptor = {
-        val descriptorOut = Wire(new RequestDescriptor(inMaxID, outMaxID))
-        descriptorOut.baseID := 0.U
-        descriptorOut.requestPlacement := config.U // reuse this field to support route back
-        descriptorOut.done := false.B
-        descriptorOut.dst := DESTINATION.PREFETCH_UNIT
-        descriptorOut.addr := addr + stream2PhysicalAddressStart
-        descriptorOut.size := 6.U
-        descriptorOut.config := config.U
-        descriptorOut
-    }
-    
-
-
-
-
-    val PrefetcherRME = Module(new SingleNextLinePrefetcherRME(SingleNextLinePrefetcherParams(ahead=depthAhead, handleVA=true)))
-    val DownstreamReqQueue = Module(new Queue(new RequestDescriptor(inMaxID, outMaxID), depthAhead, flow=false)) // can maybe just make this an address, and make descriptor on way out
-    val RequestQueueArb = Module(new RRArbiter(new RequestDescriptor(inMaxID, outMaxID), 2))
-
-    when (PrefetcherRME.io.request.fire)
-    {
-      //SynthesizePrintf("[PrefetcherRME] PREFETCHER FIRE 0x%x\n", PrefetcherRME.io.request.bits.address)
+      val descriptor = Wire(new RequestDescriptor(inMaxID, outMaxID, params))
+      descriptor := 0.U.asTypeOf(descriptor)
+      descriptor.requestPlacement := config.U
+      descriptor.dst := DESTINATION.PREFETCH_UNIT
+      descriptor.addr := addr
+      descriptor.size := 6.U
+      descriptor.config := config.U
+      descriptor
     }
 
-  
-    RequestQueueArb.io.in(0).bits := MakeReqDescriptor(PrefetcherRME.io.request.bits.address)
-    RequestQueueArb.io.in(0).valid := PrefetcherRME.io.request.valid
-    PrefetcherRME.io.request.ready := RequestQueueArb.io.in(0).ready
+    io.FetchUnit.ToPre.ready := true.B
+    val responseAddr = io.FetchUnit.ToPre.bits.addr
+    val responseMatches = pendingMatches(responseAddr)
+    val responseEntry = PriorityEncoder(responseMatches)
+    val freshResponse = io.FetchUnit.ToPre.fire && responseMatches.asUInt.orR &&
+      !OutBoundReqTable(responseEntry).stale && !io.Requestor.rst
 
-    val InjectionReqAddr = Mux(io.Requestor.InjectionRequest.bits.RequestAddr < (params.rmeAddressSize).U, io.Requestor.InjectionRequest.bits.RequestAddr, 0.U) 
-    RequestQueueArb.io.in(1).bits := MakeReqDescriptor(InjectionReqAddr)
-    RequestQueueArb.io.in(1).valid := false.B
+    // Updating a matching slot avoids duplicate tags consuming cache capacity.
+    val responseCached = cachedMatches(responseAddr)
+    val refillSlot = Mux(responseCached.asUInt.orR,
+      PriorityEncoder(responseCached), OldestInjectionPacket)
+    when (freshResponse) {
+      injectionPackets(refillSlot) := io.FetchUnit.ToPre.bits.data
+      injectionPacketAddr(refillSlot) := responseAddr
+      injectionPacketsValid(refillSlot) := true.B
+      when (!responseCached.asUInt.orR) {
+        OldestInjectionPacket := Mux(OldestInjectionPacket === (nInjectionPackets-1).U,
+          0.U, OldestInjectionPacket + 1.U)
+      }
+    }
 
-    DownstreamReqQueue.io.enq <> RequestQueueArb.io.out
+    val InjectionReqAddr = io.Requestor.InjectionRequest.bits.RequestAddr
+    val demandAddr = (stream2PhysicalAddressStart + InjectionReqAddr)(46, 0)
+    val demandCached = cachedMatches(demandAddr)
+    val demandReturning = freshResponse && responseAddr === demandAddr
+    val demandAvailable = demandCached.asUInt.orR || demandReturning
+    val demandPending = pendingMatches(demandAddr).asUInt.orR
+    val demandPacket = Mux(demandReturning, io.FetchUnit.ToPre.bits.data,
+      injectionPackets(PriorityEncoder(demandCached)))
+    io.Requestor.InjectionRequest.ready := demandAvailable && !io.Requestor.rst
+    io.Requestor.Injection.valid := io.Requestor.InjectionRequest.valid &&
+      io.Requestor.InjectionRequest.ready
+    io.Requestor.Injection.bits := demandPacket.asTypeOf(Vec(16, UInt(32.W)))(
+      io.Requestor.InjectionRequest.bits.InjectionReqNum(3, 0))
 
-
-    PrefetcherRME.io.snoop.valid :=
-      io.Requestor.InjectionRequest.fire
- 
-
+    PrefetcherRME.io.snoop.valid := io.Requestor.InjectionRequest.fire
     PrefetcherRME.io.snoop.bits.write := false.B
-    PrefetcherRME.io.snoop.bits.address := io.Requestor.InjectionRequest.bits.RequestAddr
-      io.Requestor.Injection.bits := 0.U
-    val state = RegInit(DataState.Available)
+    PrefetcherRME.io.snoop.bits.address := InjectionReqAddr
 
-    io.Requestor.Injection.valid := false.B
-    io.Requestor.InjectionRequest.ready := false.B // default
+    val speculativeOffset = PrefetcherRME.io.request.bits.address
+    val speculativeAddr = (stream2PhysicalAddressStart + speculativeOffset)(46, 0)
+    val speculativeRedundant = cachedMatches(speculativeAddr).asUInt.orR ||
+      pendingMatches(speculativeAddr).asUInt.orR ||
+      (freshResponse && responseAddr === speculativeAddr)
+    val skipSpeculation = speculativeRedundant || speculativeOffset >= params.rmeAddressSize.U
+    RequestQueueArb.io.in(0).bits := MakeReqDescriptor(speculativeAddr)
+    RequestQueueArb.io.in(0).valid := PrefetcherRME.io.request.valid &&
+      !skipSpeculation && !io.Requestor.rst
+    // Skipped candidates must still advance the next-line predictor.
+    PrefetcherRME.io.request.ready := !io.Requestor.rst &&
+      (skipSpeculation || RequestQueueArb.io.in(0).ready)
+    RequestQueueArb.io.in(1).bits := MakeReqDescriptor(demandAddr)
+    RequestQueueArb.io.in(1).valid := io.Requestor.InjectionRequest.valid &&
+      !demandAvailable && !demandPending && !io.Requestor.rst
 
-    when (io.FetchUnit.ToPre.fire)
-    {
-      AllocateEntryInjectionPacketTable(io.FetchUnit.ToPre.bits.data, io.FetchUnit.ToPre.bits.addr)
-     // SynthesizePrintf("io.FetchUnit.ToPre.fire 0x%x -- 0x%x\n", io.FetchUnit.ToPre.bits.data, io.FetchUnit.ToPre.bits.addr)
-     // SynthesizePrintf("io.FetchUnit.ToPre.fire --> data 0x%x\n", io.FetchUnit.ToPre.bits.data)
-      for (i <- 0 until depthAhead*2) {
-        //SynthesizePrintf(
-        //  "packet_table[%d] addr=0x%x valid=%d data 0x%x\n",
-        //  i.U,
-        //  injectionPacketAddr(i),
-        //  injectionPacketsValid(i),
-        //  injectionPackets(i)
-        //)
-      }
+    val freeEntries = VecInit(OutBoundReqTable.map(e => !e.valid))
+    val hasFreeEntry = freeEntries.asUInt.orR
+    DownstreamReqQueue.io.enq.bits := RequestQueueArb.io.out.bits
+    DownstreamReqQueue.io.enq.valid := RequestQueueArb.io.out.valid && hasFreeEntry && !io.Requestor.rst
+    RequestQueueArb.io.out.ready := DownstreamReqQueue.io.enq.ready && hasFreeEntry && !io.Requestor.rst
+    when (DownstreamReqQueue.io.enq.fire) {
+      val entry = PriorityEncoder(freeEntries)
+      assert(!pendingMatches(DownstreamReqQueue.io.enq.bits.addr).asUInt.orR)
+      OutBoundReqTable(entry).address := DownstreamReqQueue.io.enq.bits.addr
+      OutBoundReqTable(entry).valid := true.B
+      OutBoundReqTable(entry).sent := false.B
+      OutBoundReqTable(entry).stale := false.B
     }
 
-
-    // Request to FetchUnit
-    io.FetchUnit.ToFetchUnit.valid := DownstreamReqQueue.io.deq.valid
-    DownstreamReqQueue.io.deq.ready := io.FetchUnit.ToFetchUnit.ready
+    io.FetchUnit.ToFetchUnit.valid := DownstreamReqQueue.io.deq.valid && !io.Requestor.rst
     io.FetchUnit.ToFetchUnit.bits.descriptor := DownstreamReqQueue.io.deq.bits
-    io.FetchUnit.ToFetchUnit.bits.extractionDescriptor := 0.U.asTypeOf(io.FetchUnit.ToFetchUnit.bits.extractionDescriptor)
-    io.FetchUnit.ToPre.ready := true.B // for now we will just accept everything
-
-    // When new injection request
-    when (io.Requestor.InjectionRequest.valid)
-    {
-//        SynthesizePrintf("InjectionRequest.valid 0x%x\n", io.Requestor.InjectionRequest.bits.RequestAddr)
-        /*
-            States:
-                1. Data is available
-                2. Data has been requested in outbound request
-                3. We need to request the data
-        
-        */
-        
-        val presentOutBoundTable = CheckRequestReqPresentOutboundTable(InjectionReqAddr)
-        val (isPresentDataCache, dataCacheIdx) = CheckRequestorReqPresentPacketTable(InjectionReqAddr)
-
-        when (presentOutBoundTable || isPresentDataCache)
-        {
-         // SynthesizePrintf("InjectionRequest hit! 0x%x\n", InjectionReqAddr)
-        }
-
-
-        when(io.FetchUnit.ToFetchUnit.fire)
-        {
-        //    SynthesizePrintf("(PrefetchUnit[%d].ToFetchUnit.fire) 0x%x\n", config.U, io.FetchUnit.ToFetchUnit.bits.descriptor.addr)   
-        }
-        //when (io.FetchUnit.ToPre.fire)
-        //{
-        //    SynthesizePrintf("(PrefetchUnit[%d].ToPre.fire)\n", config.U)   
-        //}
-
-
-
-        when (io.Requestor.InjectionRequest.fire)
-        {
-          //  SynthesizePrintf("(PrefetchUnit[%d].InjectionRequest.fire) 0x%x\n", config.U, io.Requestor.InjectionRequest.bits.RequestAddr)  
-        }
-
-
-        switch (state)
-        {
-          is (DataState.Available)
-          {
-            when(isPresentDataCache)
-            {
-              val data = InjectionPacketAsWords(injectionPackets(dataCacheIdx))(io.Requestor.InjectionRequest.bits.InjectionReqNum)
-//               SynthesizePrintf("isPresentDataCache %d 0x%x\n", io.Requestor.InjectionRequest.bits.InjectionReqNum, data)
-
-              io.Requestor.InjectionRequest.ready := true.B
-              io.Requestor.Injection.bits := data
-              io.Requestor.Injection.valid := true.B
-
-            }.elsewhen(presentOutBoundTable)
-            {
-             // SynthesizePrintf("PrefetchUnitCurrentState %d present in OutBoundTable\n", state.asUInt)
-              val pred = io.FetchUnit.ToPre.fire && (io.FetchUnit.ToPre.bits.addr-stream2PhysicalAddressStart) === InjectionReqAddr
-              state := Mux(pred, DataState.Available, DataState.Requested) // ensure we 
-              when(pred)
-              {
-                FreeTableEntry(InjectionReqAddr)
-              }
-
-            }
-            .otherwise
-            {
-            //  SynthesizePrintf("PrefetchUnitCurrentState %d NeedRequest\n", state.asUInt)
-              state := DataState.NeedRequest
-            }
-          }
-
-          is (DataState.Requested)
-          {
-           // SynthesizePrintf("PrefetchUnit CurrentState=Requested\n")
-            val pred = io.FetchUnit.ToPre.fire && (io.FetchUnit.ToPre.bits.addr-stream2PhysicalAddressStart) === InjectionReqAddr
-            state := Mux(pred, DataState.Available, DataState.Requested)
-            when(pred)
-            {
-              FreeTableEntry(InjectionReqAddr)
-            }            
-          }
-
-          is (DataState.NeedRequest)
-          {
-           // SynthesizePrintf("PrefetchUnit NeedRequest %d\n", RequestQueueArb.io.in(1).fire)
-            RequestQueueArb.io.in(1).valid := true.B
-            val pred = RequestQueueArb.io.in(1).fire
-            state := Mux(pred, DataState.Requested, DataState.NeedRequest)
-            when (RequestQueueArb.io.in(1).fire) {
-              AllocateTableEntry(InjectionReqAddr)
-            }
-          }
-        }
+    io.FetchUnit.ToFetchUnit.bits.extractionDescriptor :=
+      0.U.asTypeOf(io.FetchUnit.ToFetchUnit.bits.extractionDescriptor)
+    DownstreamReqQueue.io.deq.ready := io.FetchUnit.ToFetchUnit.ready && !io.Requestor.rst
+    val sentMatches = pendingMatches(DownstreamReqQueue.io.deq.bits.addr)
+    when (io.FetchUnit.ToFetchUnit.fire) {
+      assert(PopCount(sentMatches) === 1.U)
     }
-
-
-    when (io.Requestor.rst) {
-      for (i <- 0 until nInjectionPackets) {
+    for (i <- 0 until nInjectionPackets) {
+      when (io.FetchUnit.ToFetchUnit.fire && sentMatches(i)) {
+        OutBoundReqTable(i).sent := true.B
+      }
+      when (io.FetchUnit.ToPre.fire && responseMatches(i)) {
+        OutBoundReqTable(i).valid := false.B
+      }
+      when (io.Requestor.rst) {
         injectionPacketsValid(i) := false.B
+        OutBoundReqTable(i).valid := OutBoundReqTable(i).valid &&
+          OutBoundReqTable(i).sent && !(io.FetchUnit.ToPre.fire && responseMatches(i))
+        OutBoundReqTable(i).stale := true.B
       }
     }
+    when (io.Requestor.rst) { OldestInjectionPacket := 0.U }
 }

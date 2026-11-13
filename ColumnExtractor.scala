@@ -14,21 +14,21 @@ import freechips.rocketchip.diplomacy.BufferParams.flow
 
 
 
-case class CtrlUnitColExtractorIO(inMaxID: Int, outMaxID: Int, nExtractionDesc : Int = 16) extends Bundle {
+case class CtrlUnitColExtractorIO(inMaxID: Int, outMaxID: Int, nExtractionDesc : Int = 16, params: RelMemParams = RelMemParams()) extends Bundle {
     val data = UInt(512.W) // take in an entire cache line
     val position = UInt(log2Ceil(64).W)
     val extractionDescriptors = Vec(nExtractionDesc, new ExtractionDescriptor(4))
     val extractionDescriptorsValid = Vec(nExtractionDesc, Bool())
-    val descriptorIn = new RequestDescriptor(inMaxID, outMaxID)
+    val descriptorIn = new RequestDescriptor(inMaxID, outMaxID, params)
 }
 
 
-case class ColumnExtractorIO(inMaxID:Int, outmaxID : Int, dataRegWidth : Int, nExtractionDesc: Int = 16, minDataSize: Int = 4) extends Bundle {
+case class ColumnExtractorIO(inMaxID:Int, outmaxID : Int, dataRegWidth : Int, nExtractionDesc: Int = 16, minDataSize: Int = 4, params: RelMemParams = RelMemParams()) extends Bundle {
 
-    //val DescriptorIn = Input(RequestDescriptor(inMaxID, outmaxID))
+    //val DescriptorIn = Input(RequestDescriptor(inMaxID, outmaxID, params))
    // val DataSizeOut = Output(UInt(7.W)) // size in bytes
-    val CtrlUnit = Flipped(DecoupledIO(new CtrlUnitColExtractorIO(inMaxID, outmaxID)))
-    val Packer = DecoupledIO(PackerColExtractIO(inMaxID, outmaxID, dataRegWidth, minDataSize, nExtractionDesc))
+    val CtrlUnit = Flipped(DecoupledIO(new CtrlUnitColExtractorIO(inMaxID, outmaxID, nExtractionDesc, params)))
+    val Packer = DecoupledIO(PackerColExtractIO(inMaxID, outmaxID, dataRegWidth, minDataSize, nExtractionDesc, params))
 
     
 }
@@ -47,12 +47,12 @@ class ColumnExtractor(params: RelMemParams, inMaxID : Int, outmaxID : Int, nExtr
 
 
 
-    val io = IO(new ColumnExtractorIO(inMaxID, outmaxID, dataRegWidth))
+    val io = IO(new ColumnExtractorIO(inMaxID, outmaxID, dataRegWidth, nExtractionDesc, params = params))
     io.Packer.valid := false.B
-    io.Packer.bits := 0.U.asTypeOf(new PackerColExtractIO(inMaxID, outmaxID, dataRegWidth, 4, nExtractionDesc))
+    io.Packer.bits := 0.U.asTypeOf(new PackerColExtractIO(inMaxID, outmaxID, dataRegWidth, 4, nExtractionDesc, params))
 
     val tmpLine = RegInit(0.U(512.W))
-    //val tmpDescriptor = Reg(new RequestDescriptor(inMaxID, outmaxID))
+    //val tmpDescriptor = Reg(new RequestDescriptor(inMaxID, outmaxID, params))
     val tmpWire = WireInit(0.U(dataRegWidth.W))
     val hasValidLine = RegInit(false.B)
     val descriptors = RegInit(
@@ -67,7 +67,7 @@ class ColumnExtractor(params: RelMemParams, inMaxID : Int, outmaxID : Int, nExtr
 
 
     val descriptorCount = RegInit(0.U(log2Ceil(nExtractionDesc+1).W))
-    val descriptor = Reg(new RequestDescriptor(inMaxID, outmaxID))
+    val descriptor = Reg(new RequestDescriptor(inMaxID, outmaxID, params))
 
     when(io.CtrlUnit.fire) {
         tmpLine         := io.CtrlUnit.bits.data
@@ -107,7 +107,7 @@ class ColumnExtractor(params: RelMemParams, inMaxID : Int, outmaxID : Int, nExtr
     val validPacker = RegInit(false.B)
     validPacker :=  Mux(io.CtrlUnit.fire, true.B, Mux(io.Packer.fire, false.B, validPacker))
     io.Packer.valid := validPacker
-    io.CtrlUnit.ready := !validPacker
+    io.CtrlUnit.ready := !validPacker || io.Packer.ready
     (0 until nExtractionDesc).foreach { i =>
         val edescriptor = descriptors(i)
         val result = Wire(UInt(64.W)) // max = 8 bytes

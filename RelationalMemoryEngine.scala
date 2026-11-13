@@ -29,12 +29,26 @@ case class RelMemParams (
     rmeaddress: BigInt =     0x100000000L,
     rmeAddressSize: BigInt =  0x80000000L,
     controlBeatBytes : Int = 8,
-    nFetchUnits : Int = 16,
+    nFetchUnits : Int = 128, // total request-table entries, partitioned across configs
     inBoundXbar : Option[TLXbar] = None,
     withPerfCounter : Boolean = false,
     maxConfigs : Int = 4,
     maxDataSize : Int = 3, // 2^maxDataSize --> same as TL.A.size
-)
+    nPackersPerConfig: Seq[Int] = Seq.empty, // empty selects two packers per config
+) {
+    require(maxConfigs > 0)
+    require(nFetchUnits >= maxConfigs, "Each config needs at least one fetch entry")
+    require(nPackersPerConfig.isEmpty || nPackersPerConfig.size == maxConfigs,
+      "nPackersPerConfig must contain one count per config")
+    val packerCounts: Seq[Int] =
+      if (nPackersPerConfig.isEmpty) Seq.fill(maxConfigs)(8) else nPackersPerConfig
+    require(packerCounts.forall(_ > 0), "Each config needs at least one packer")
+
+    def fetchEntries(config: Int): Int =
+      nFetchUnits / maxConfigs + (if (config < nFetchUnits % maxConfigs) 1 else 0)
+    def fetchOffset(config: Int): Int =
+      config * (nFetchUnits / maxConfigs) + math.min(config, nFetchUnits % maxConfigs)
+}
 
 case object RMEKey extends Field[Option[RelMemParams]](None)
 
@@ -365,11 +379,17 @@ class RME(params: RelMemParams)(implicit p: Parameters) extends LazyModule
       }
       
 
+      val packer_backpressure = RegInit(
+        VecInit(Seq.fill(params.maxConfigs)(
+          0.U(log2Ceil(params.nPackersPerConfig(0)).W))
+        )
+      )
 
 
 
-
-      val fetch_unit = Module(new FetchUnitRME(params, node, cachedRegionEdge, toLLCNode, 0,0))
+      val fetch_units = Seq.tabulate(params.maxConfigs) { configIndex =>
+        Module(new FetchUnitRME(params, out_edge, cachedRegionEdge, toLLCNode.out(0)._2, configIndex))
+      }
 
 
 
@@ -453,9 +473,15 @@ class RME(params: RelMemParams)(implicit p: Parameters) extends LazyModule
       replyFromDRAMDemux.io.sel := replySelectorCond // if any conditions are true, broadcast to fetch units
       replyFromDRAMDemux.io.outB.ready := false.B // default 
 
-      fetch_unit.io.inReply.valid := replySelectorCond && out.d.valid
-      fetch_unit.io.inReply.bits := replyFromDRAMDemux.io.outB.bits
-      replyFromDRAMDemux.io.outB.ready := fetch_unit.io.inReply.ready
+      val dramReplyEntry = outMaxID.U - replyFromDRAMDemux.io.outB.bits.source
+      fetch_units.zipWithIndex.foreach { case (fetch, configIndex) =>
+        val offset = params.fetchOffset(configIndex)
+        val ownsReply = dramReplyEntry >= offset.U &&
+          dramReplyEntry < (offset + params.fetchEntries(configIndex)).U
+        fetch.io.inReply.bits := replyFromDRAMDemux.io.outB.bits
+        fetch.io.inReply.valid := replyFromDRAMDemux.io.outB.valid && ownsReply
+        when (ownsReply) { replyFromDRAMDemux.io.outB.ready := fetch.io.inReply.ready }
+      }
 
 
       //when (out.d.fire)
@@ -464,7 +490,7 @@ class RME(params: RelMemParams)(implicit p: Parameters) extends LazyModule
       //}
 
 
-      perfDTU := perfDTU + fetch_unit.io.OutReq.fire.asUInt
+      perfDTU := perfDTU + PopCount(VecInit(fetch_units.map(_.io.OutReq.fire)))
       perfNonDTU := perfNonDTU + (in_edge.first(in.a) && in.a.fire).asUInt
 
 
@@ -479,7 +505,7 @@ class RME(params: RelMemParams)(implicit p: Parameters) extends LazyModule
 
 
       // Outgoing arbiter for passthrough and RME requests
-      val fetch_unit_outbound = Seq(fetch_unit.io.OutReq) //fetch_units.map(fetch_unit => fetch_unit.OutReq)
+      val fetch_unit_outbound = fetch_units.map(_.io.OutReq) //fetch_units.map(fetch_unit => fetch_unit.OutReq)
       TLArbiter.robin(out_edge, out.a, (Seq(in.a) ++ fetch_unit_outbound):_*) // we have to pass as a single Seq i guess
       
      
@@ -520,79 +546,56 @@ class RME(params: RelMemParams)(implicit p: Parameters) extends LazyModule
         req.Config := config
       }
 
-      fetch_unit.io.Config := config
+      // Each pipeline arbitrates only its own demand and prefetch descriptors.
+      val localRequestArbs = Seq.tabulate(params.maxConfigs) { configIndex =>
+        val arb = Module(new RRArbiter(requestors.head.FetchUnit.bits.cloneType, 2))
+        arb.io.in(0) <> requestors(configIndex).FetchUnit
+        arb.io.in(1) <> prefetch_units(configIndex).FetchUnit.ToFetchUnit
+        arb
+      }
+      perfPrefetchUnit := perfPrefetchUnit + PopCount(VecInit(
+        localRequestArbs.map(_.io.in(1).fire)))
 
-
-      val reqFetchIO = requestors.map(_.FetchUnit)
-      val fetchUnitReady = fetch_unit.io.Requestor.ready
-      val requestorArb = Module(new RRArbiter(requestors.head.FetchUnit.bits.cloneType, params.maxConfigs))
-      requestorArb.io.in <> reqFetchIO
-
-      // Previous implementation: once a requestor fired, it retained exclusive access
-      // until its descriptor marked the final request. This prevented other requestors
-      // from making progress while a long request-generation stream was active.
-      //
-      // val reqdoneIO = requestors.map(_.FetchUnit.bits.descriptor.done)
-      // val RequestorActive = RegInit(false.B)
-      // val ActiveRequestor = RegInit(0.U(log2Ceil(params.maxConfigs).W))
-      // val active_vector = reqFetchIO.map(req => req.fire)
-      // reqFetchIO.zipWithIndex.foreach { case (req, i) =>
-      //   when (reqdoneIO(i) && req.fire && ActiveRequestor === i.U) {
-      //     RequestorActive := false.B
-      //   }.elsewhen (req.fire) {
-      //     ActiveRequestor := i.U
-      //     RequestorActive := true.B
-      //   }
-      // }
-      // reqFetchIO.zipWithIndex.foreach { case (req, i) =>
-      //   req.ready := requestorArb.io.in(i).ready && (!RequestorActive || ActiveRequestor === i.U)
-      //   requestorArb.io.in(i).valid := req.valid && (!RequestorActive || ActiveRequestor === i.U)
-      // }
-
-
-      
-
-      val prefetchArb = Module(new RRArbiter(prefetch_units.head.FetchUnit.ToFetchUnit.bits.cloneType, params.maxConfigs))
-      perfPrefetchUnit := perfPrefetchUnit + prefetchArb.io.out.fire
-      prefetch_units.zipWithIndex.foreach { case (pre, i) => 
-        prefetchArb.io.in(i) <> pre.FetchUnit.ToFetchUnit  
+      val directory = Module(new FetchDirectoryArbiter(params, inMaxID, outMaxID))
+      io.DTU_DirectoryIOIn <> directory.io.DirectoryRequest
+      directory.io.DirectoryResponse <> io.DTU_DirectoryIOOut
+      fetch_units.zipWithIndex.foreach { case (fetch, configIndex) =>
+        fetch.io.Config := config
+        directory.io.Requests(configIndex) <> localRequestArbs(configIndex).io.out
+        fetch.io.Requestor <> directory.io.ToFetch(configIndex)
+        fetch.io.IncomingReqInCache := directory.io.CacheHit(configIndex)
       }
 
-      val prefetchReqArb = Module(new RRArbiter(prefetch_units.head.FetchUnit.ToFetchUnit.bits.cloneType, 2))
-      prefetchReqArb.io.in(0) <> requestorArb.io.out
-      prefetchReqArb.io.in(1) <> prefetchArb.io.out
-
-      val selectedRequestor = prefetchReqArb.io.out
-      selectedRequestor.ready := fetchUnitReady 
-      fetch_unit.io.Requestor.valid := selectedRequestor.valid
-      fetch_unit.io.Requestor.bits := selectedRequestor.bits
-      
-
-
-      // LLC Port
-      io.DTU_DirectoryIOIn.valid := selectedRequestor.fire
-      io.DTU_DirectoryIOIn.bits := selectedRequestor.bits.descriptor.addr
-      fetch_unit.io.IncomingReqInCache := io.DTU_DirectoryIOOut.valid && io.DTU_DirectoryIOOut.bits
       val (toLLC, toLLCEdge) = toLLCNode.out(0)
-      fetch_unit.io.LLCOutReq <> toLLC.a
-      fetch_unit.io.LLCInReply <> toLLC.d
-      when (toLLC.a.fire)
-      {
-         perfLLCPort := 1.U + perfLLCPort
+      TLArbiter.robin(toLLCEdge, toLLC.a, fetch_units.map(_.io.LLCOutReq):_*)
+      toLLC.d.ready := false.B
+      fetch_units.zipWithIndex.foreach { case (fetch, configIndex) =>
+        val offset = params.fetchOffset(configIndex)
+        val ownsReply = toLLC.d.bits.source >= offset.U &&
+          toLLC.d.bits.source < (offset + params.fetchEntries(configIndex)).U
+        fetch.io.LLCInReply.bits := toLLC.d.bits
+        fetch.io.LLCInReply.valid := toLLC.d.valid && ownsReply
+        when (ownsReply) { toLLC.d.ready := fetch.io.LLCInReply.ready }
       }
+      when (toLLC.d.valid) { assert(toLLC.d.bits.source < params.nFetchUnits.U) }
+      when (toLLC.a.fire) { perfLLCPort := perfLLCPort + 1.U }
 
-    control_unit.io.FetchUnitPort <> fetch_unit.io.ControlUnit
-    control_unit.io.PackerAdmission <> fetch_unit.io.PackerAdmission
-    fetch_unit.io.PrefetchReady := VecInit(prefetch_units.map(_.FetchUnit.ToPre.ready))
-    val toPreReady = prefetch_units.zipWithIndex.map { case (pre, i) =>
-      pre.FetchUnit.ToPre.ready &&
-      (fetch_unit.io.Prefetch.ToPre.bits.config === i.U)
-    }.reduce(_ || _)
-    fetch_unit.io.Prefetch.ToPre.ready := toPreReady
-    prefetch_units.zipWithIndex.foreach {case (pre, i) =>
-      pre.FetchUnit.ToPre.bits := fetch_unit.io.Prefetch.ToPre.bits
-      pre.FetchUnit.ToPre.valid := (fetch_unit.io.Prefetch.ToPre.valid && (fetch_unit.io.Prefetch.ToPre.bits.config === i.U)) 
-    }
+      // Fetch outputs already consult their own bank's admission queries, so a
+      // blocked config cannot take ownership of the shared control-unit input.
+      val returnArb = Module(new RRArbiter(fetch_units.head.io.ControlUnit.bits.cloneType, params.maxConfigs))
+      fetch_units.zipWithIndex.foreach { case (fetch, configIndex) =>
+        returnArb.io.in(configIndex) <> fetch.io.ControlUnit
+        control_unit.io.PackerAdmission(configIndex) <> fetch.io.PackerAdmission
+        fetch.io.PrefetchReady := VecInit(prefetch_units.map(_.FetchUnit.ToPre.ready))
+        prefetch_units(configIndex).FetchUnit.ToPre <> fetch.io.Prefetch.ToPre
+        when (fetch.io.ControlUnit.valid) {
+          assert(fetch.io.ControlUnit.bits.reqTableEntry.descriptor.config === configIndex.U)
+        }
+        when (fetch.io.Prefetch.ToPre.valid) {
+          assert(fetch.io.Prefetch.ToPre.bits.config === configIndex.U)
+        }
+      }
+      control_unit.io.FetchUnitPort <> returnArb.io.out
 
 
   }

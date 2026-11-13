@@ -14,11 +14,11 @@ import freechips.rocketchip.util.SeqToAugmentedSeq
 
 
 
-case class PackerColExtractIO(inMaxID:Int, outmaxID : Int, dataRegWidth: Int, minDataSize: Int, nExtractDesc : Int) extends Bundle {
+case class PackerColExtractIO(inMaxID:Int, outmaxID : Int, dataRegWidth: Int, minDataSize: Int, nExtractDesc : Int, params: RelMemParams = RelMemParams()) extends Bundle {
     //val dataIn = Output(UInt(dataRegWidth.W))
     val dataSize = Output(UInt(2.W))
     //val placement = Output(UInt(log2Ceil(64).W))
-    val descriptorIn = Output(RequestDescriptor(inMaxID, outmaxID))
+    val descriptorIn = Output(RequestDescriptor(inMaxID, outmaxID, params))
 
     val dataInValid = Output(Vec(nExtractDesc, Bool()))
     val dataVecIn = Output(Vec(nExtractDesc, UInt(64.W))) 
@@ -36,7 +36,7 @@ class PackerRME(params : RelMemParams, inMaxID: Int, outmaxID : Int, nExtraction
     val beatWidth = 8
     val dataRegWidth = (math.pow(2, params.maxDataSize+1)).toInt * beatWidth // this should give us the extra byte we need to extract excesses
     val io = IO(new Bundle {
-        val ColExtractor = Flipped(DecoupledIO(PackerColExtractIO(inMaxID, outmaxID, dataRegWidth, 4, nExtractionDesc)))
+        val ColExtractor = Flipped(DecoupledIO(PackerColExtractIO(inMaxID, outmaxID, dataRegWidth, 4, nExtractionDesc, params)))
         val Trapper = DecoupledIO(PackerTrapperIO(inMaxID))
     })
 

@@ -12,9 +12,9 @@ import freechips.rocketchip.diplomacy.BufferParams.flow
 
 
 
-case class RequestTableEntry(inMaxID : Int, outMaxID : Int, nExtractDesc : Int) extends Bundle
+case class RequestTableEntry(inMaxID : Int, outMaxID : Int, nExtractDesc : Int, params: RelMemParams = RelMemParams()) extends Bundle
 {
-    val descriptor = new RequestDescriptor(inMaxID, outMaxID)
+    val descriptor = new RequestDescriptor(inMaxID, outMaxID, params)
     val extractionDescriptors = Vec(nExtractDesc, new ExtractionDescriptor(4))
     val extractionDescriptorsValid = Vec(nExtractDesc, Bool())
     //val activeDesc = UInt(log2Ceil(nExtractDesc+1).W)
@@ -22,10 +22,10 @@ case class RequestTableEntry(inMaxID : Int, outMaxID : Int, nExtractDesc : Int) 
 }
 
 
-case class FetchUnitControlPort(tlParams : TLBundleParameters, inMaxID : Int, outMaxID : Int, dataRegWidth: Int, nExtractDesc: Int = 16) extends Bundle
+case class FetchUnitControlPort(tlParams : TLBundleParameters, inMaxID : Int, outMaxID : Int, dataRegWidth: Int, nExtractDesc: Int = 16, params: RelMemParams = RelMemParams()) extends Bundle
 {
     val data = Output(UInt(512.W)) // 64 bytes = 1 cache line
-    val reqTableEntry = Output(new RequestTableEntry(inMaxID, outMaxID, nExtractDesc))
+    val reqTableEntry = Output(new RequestTableEntry(inMaxID, outMaxID, nExtractDesc, params))
 }
 
 
@@ -35,15 +35,44 @@ case class PackerAdmissionQuery(inMaxID: Int) extends Bundle {
     val ready = Input(Bool())
 }
 
+// Accepts one probe per cycle on the shared directory port and returns its
+// one-cycle result only to the pipeline that accepted the descriptor.
+class FetchDirectoryArbiter(params: RelMemParams, inMaxID: Int, outMaxID: Int) extends Module {
+    val io = IO(new Bundle {
+        val Requests = Flipped(Vec(params.maxConfigs, Decoupled(new RequestorFetchUnitPort(inMaxID, outMaxID, params))))
+        val ToFetch = Vec(params.maxConfigs, Decoupled(new RequestorFetchUnitPort(inMaxID, outMaxID, params)))
+        val DirectoryRequest = Valid(UInt(48.W))
+        val DirectoryResponse = Flipped(Valid(Bool()))
+        val CacheHit = Output(Vec(params.maxConfigs, Bool()))
+    })
+    val arb = Module(new RRArbiter(new RequestorFetchUnitPort(inMaxID, outMaxID, params), params.maxConfigs))
+    val responsePending = RegNext(arb.io.out.fire, false.B)
+    val owner = RegEnable(arb.io.chosen, arb.io.out.fire)
+    arb.io.out.ready := true.B
+    io.DirectoryRequest.valid := arb.io.out.fire
+    io.DirectoryRequest.bits := arb.io.out.bits.descriptor.addr
+    // FetchUnit consumes the directory decision on the cycle after allocation.
+    // A response uses the registered owner while the next probe is accepted.
+    assert(io.DirectoryResponse.valid === responsePending)
+    for (config <- 0 until params.maxConfigs) {
+        arb.io.in(config).bits := io.Requests(config).bits
+        arb.io.in(config).valid := io.Requests(config).valid && io.ToFetch(config).ready
+        io.Requests(config).ready := arb.io.in(config).ready && io.ToFetch(config).ready
+        io.ToFetch(config).bits := io.Requests(config).bits
+        io.ToFetch(config).valid := arb.io.out.valid && arb.io.chosen === config.U
+        io.CacheHit(config) := responsePending && io.DirectoryResponse.valid && owner === config.U && io.DirectoryResponse.bits
+    }
+}
+
 case class FetchUnitIO(tlInParams: TLBundleParameters, tlOutParams: TLBundleParameters, inMaxID : Int, outMaxID : Int, dataRegWidth : Int, toCacheParams: TLBundleParameters, params: RelMemParams) extends Bundle
 {
 
     
 
 // Requestor Port
-        val Requestor = Flipped(Decoupled(new RequestorFetchUnitPort(inMaxID, outMaxID))) // Receive address to request from the Requestor Module]
+        val Requestor = Flipped(Decoupled(new RequestorFetchUnitPort(inMaxID, outMaxID, params))) // Receive address to request from the Requestor Module]
         val Config = Flipped(RMEConfigPortIO(params))
-        val Prefetch = Flipped(new FetchUnitPrefetchUnitPort(inMaxID, outMaxID))
+        val Prefetch = Flipped(new FetchUnitPrefetchUnitPort(inMaxID, outMaxID, params))
         //val FetchReq = Flipped(Decoupled(Output(new TLBundleA(tlInEdge.bundle))))
         //val isBaseRequest = Flipped(Output(Bool()))
         //val Requestor_isBaseRequest = Flipped(Decoupled(Bool()))
@@ -65,7 +94,7 @@ case class FetchUnitIO(tlInParams: TLBundleParameters, tlOutParams: TLBundlePara
         val OutReq = Decoupled(new TLBundleA(tlOutParams)) // send outbound memory requests to DRAM
         val inReply = Flipped(Decoupled(new TLBundleD(tlOutParams))) // receive inbound data from DRAM
         // Control Unit Port
-        val ControlUnit = Decoupled(FetchUnitControlPort(tlInParams, inMaxID, outMaxID, dataRegWidth))
+        val ControlUnit = Decoupled(FetchUnitControlPort(tlInParams, inMaxID, outMaxID, dataRegWidth, params = params))
         val PackerAdmission = Vec(2, new PackerAdmissionQuery(inMaxID))
         val PrefetchReady = Input(Vec(params.maxConfigs, Bool()))
 
@@ -75,25 +104,23 @@ case class FetchUnitIO(tlInParams: TLBundleParameters, tlOutParams: TLBundlePara
 
 
 
-class FetchUnitRME(params: RelMemParams, adapter: TLAdapterNode, cachedRegionEdge: TLEdgeIn, toCacheNode : TLClientNode, instance: Int, subInstance: Int)(
-    implicit p: Parameters) extends Module {
+class FetchUnitRME(params: RelMemParams, tlOutEdge: TLEdgeOut, cachedRegionEdge: TLEdgeIn,
+    toCacheOutTLInEdge: TLEdgeOut, instance: Int)(implicit p: Parameters) extends Module {
 
-        val (out, tlOutEdge) = adapter.out(0)
-        val (in, tlInEdge) = adapter.in(0)
-
-        val (toCacheOutBundle, toCacheOutTLInEdge) = toCacheNode.out(0)
         val toCacheTLParams = toCacheOutTLInEdge.bundle
 
-        val tlOutA = out.a
-        val tlOutD = out.d
         val tlOutParams = tlOutEdge.bundle
         val tlInParams = cachedRegionEdge.bundle
         val inMaxID = (math.pow(2, cachedRegionEdge.bundle.sourceBits)-1).toInt
         val outMaxID = (math.pow(2, tlOutParams.sourceBits)-1).toInt
         val beatWidth = 8
         val dataRegWidth = (math.pow(2, params.maxDataSize+1)).toInt * beatWidth // this should give us the extra byte we need to extract excesses
-        val srcID = (outMaxID - subInstance).U
-        val io = IO(new FetchUnitIO(tlInParams, tlOutParams, inMaxID, outMaxID, dataRegWidth, toCacheTLParams, params)).suggestName(s"fetchunitio_$instance-$subInstance")
+        require(instance >= 0 && instance < params.maxConfigs)
+        val nEntries = params.fetchEntries(instance)
+        val sourceOffset = params.fetchOffset(instance)
+        require(params.nFetchUnits <= (outMaxID + 1) / 2,
+            "DTU fetch IDs must fit in the expanded source-ID space")
+        val io = IO(new FetchUnitIO(tlInParams, tlOutParams, inMaxID, outMaxID, dataRegWidth, toCacheTLParams, params)).suggestName(s"fetchunitio_$instance")
 
         io.OutReq.valid := false.B
         io.OutReq.bits := 0.U.asTypeOf(new TLBundleA(tlOutParams))
@@ -107,8 +134,8 @@ class FetchUnitRME(params: RelMemParams, adapter: TLAdapterNode, cachedRegionEdg
 
 
         // Request Table Init //
-        val emptyEntry = Wire(new RequestTableEntry(inMaxID, outMaxID, nExtractDesc))
-        emptyEntry.descriptor := 0.U.asTypeOf(RequestDescriptor(inMaxID, outMaxID))
+        val emptyEntry = Wire(new RequestTableEntry(inMaxID, outMaxID, nExtractDesc, params))
+        emptyEntry.descriptor := 0.U.asTypeOf(RequestDescriptor(inMaxID, outMaxID, params))
         emptyEntry.extractionDescriptors := VecInit(Seq.fill(nExtractDesc) 
         { // extractionDescriptors init (each element must be initialized)
             val ed = Wire(new ExtractionDescriptor(4))
@@ -130,8 +157,8 @@ class FetchUnitRME(params: RelMemParams, adapter: TLAdapterNode, cachedRegionEdg
         */
         val dataReg = RegInit(0.U(512.W)) // store a single cache line we get from DRAM
         val dataReg2 = RegInit(0.U(512.W)) // store a single cache line we get from DRAM
-        val receivingEntry = RegInit(0.U(log2Ceil(params.nFetchUnits).W))
-        val receivingEntry2 = RegInit(0.U(log2Ceil(params.nFetchUnits).W))
+        val receivingEntry = RegInit(0.U(math.max(1, log2Ceil(nEntries)).W))
+        val receivingEntry2 = RegInit(0.U(math.max(1, log2Ceil(nEntries)).W))
         val dataRegFull = RegInit(false.B)
         val dataRegActive = RegInit(false.B)
         val dataReg2Full = RegInit(false.B)
@@ -144,7 +171,7 @@ class FetchUnitRME(params: RelMemParams, adapter: TLAdapterNode, cachedRegionEdg
         /*
             Store information on outbound requests here
         */
-        val requestTable = RegInit(VecInit(Seq.fill(params.nFetchUnits)(emptyEntry)))
+        val requestTable = RegInit(VecInit(Seq.fill(nEntries)(emptyEntry)))
         // HELPER FUNCTIONS 
 
 
@@ -188,8 +215,8 @@ class FetchUnitRME(params: RelMemParams, adapter: TLAdapterNode, cachedRegionEdg
 
 
         def AllocateEntry(entry: UInt, reqPort: RequestorFetchUnitPort) : Unit = {
-            val reqTableEntry = Wire(new RequestTableEntry(inMaxID, outMaxID, nExtractDesc))
-            reqTableEntry := 0.U.asTypeOf(new RequestTableEntry(inMaxID, outMaxID, nExtractDesc))
+            val reqTableEntry = Wire(new RequestTableEntry(inMaxID, outMaxID, nExtractDesc, params))
+            reqTableEntry := 0.U.asTypeOf(new RequestTableEntry(inMaxID, outMaxID, nExtractDesc, params))
             reqTableEntry.descriptor := reqPort.descriptor
             val pos = reqPort.extractionDescriptor.pos
             reqTableEntry.extractionDescriptors(pos) := reqPort.extractionDescriptor
@@ -265,7 +292,7 @@ class FetchUnitRME(params: RelMemParams, adapter: TLAdapterNode, cachedRegionEdg
 
 
         val hasOutReqToSend = RegInit(false.B)
-        val outReqEntryToSend = RegInit(0.U(log2Ceil(params.nFetchUnits).W))
+        val outReqEntryToSend = RegInit(0.U(math.max(1, log2Ceil(nEntries)).W))
         val hasOutReqToCache = RegInit(false.B)
         val alloc_entry = FirstAvailableEntry()
         val cvec = GetCoalesceVec(io.Requestor.bits.descriptor)
@@ -290,7 +317,7 @@ class FetchUnitRME(params: RelMemParams, adapter: TLAdapterNode, cachedRegionEdg
                 //hasOutReqToCache := false.B //io.IncomingReqInCache && !io.LLCOutReq.fire
                 io.OutReq.valid := false.B //!io.IncomingReqInCache
                 outReqEntryToSend := alloc_entry
-                val src = outMaxID.U-alloc_entry
+                val src = outMaxID.U - sourceOffset.U - alloc_entry
                 //io.OutReq.bits := DescriptorToOutReq(io.Requestor.bits.descriptor, src)
                 firstWaitCycle := true.B
 
@@ -324,14 +351,14 @@ class FetchUnitRME(params: RelMemParams, adapter: TLAdapterNode, cachedRegionEdg
             val outReq = Wire(new TLBundleA(tlOutParams))
             val outReqToCache = Wire(new TLBundleA(toCacheTLParams))
 
-            val src = outMaxID.U-outReqEntryToSend
+            val src = outMaxID.U - sourceOffset.U - outReqEntryToSend
             val maxDRAM = math.pow(2, 33).toLong
             val descriptorAddr = requestTable(outReqEntryToSend).descriptor.addr
             val descriptorConfig = requestTable(outReqEntryToSend).descriptor.config
             val isDTUAddr = descriptorAddr >= maxDRAM.U
             outReq := DescriptorToOutReq(requestTable(outReqEntryToSend).descriptor, src)
             val toDTUCond = isDTUAddr && AddrIsValidConfig(descriptorAddr, descriptorConfig)
-            outReqToCache := DescriptorToCacheReq(requestTable(outReqEntryToSend).descriptor, outReqEntryToSend, toDTUCond)
+            outReqToCache := DescriptorToCacheReq(requestTable(outReqEntryToSend).descriptor, sourceOffset.U +& outReqEntryToSend, toDTUCond)
 
             val ReqIsToCache = Mux(firstWaitCycle, io.IncomingReqInCache || toDTUCond, hasOutReqToCache) 
             hasOutReqToCache := Mux(firstWaitCycle, Mux((io.OutReq.fire || io.LLCOutReq.fire), false.B, ReqIsToCache), ReqIsToCache && (!io.OutReq.fire && !io.LLCOutReq.fire))
@@ -397,12 +424,21 @@ class FetchUnitRME(params: RelMemParams, adapter: TLAdapterNode, cachedRegionEdg
         when (io.inReply.fire) {
            // SynthesizePrintf("[FetchUnit]: inReply.firesrc %d (%d,%d,%d) dataRegfull %d\n", io.inReply.bits.source, d_first_cache, d_last_cache, d_done_cache, dataReg2Full)
         }
+        when (io.inReply.valid) {
+            val entry = outMaxID.U - io.inReply.bits.source
+            assert(entry >= sourceOffset.U && entry < (sourceOffset + nEntries).U)
+        }
+        when (io.LLCInReply.valid) {
+            assert(io.LLCInReply.bits.source >= sourceOffset.U &&
+                io.LLCInReply.bits.source < (sourceOffset + nEntries).U)
+        }
+        when (io.Requestor.fire) { assert(io.Requestor.bits.descriptor.config === instance.U) }
         when (d_first && io.inReply.fire) {
-            receivingEntry  := outMaxID.U - io.inReply.bits.source
+            receivingEntry  := outMaxID.U - io.inReply.bits.source - sourceOffset.U
         }
 
         when (d_first_cache && io.LLCInReply.fire) {
-            receivingEntry2  := io.LLCInReply.bits.source
+            receivingEntry2  := io.LLCInReply.bits.source - sourceOffset.U
         }
 
 
