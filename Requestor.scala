@@ -95,6 +95,7 @@ class RequestorRME(params: RelMemParams, tlInEdge : TLEdge, tlOutEdge: TLEdge, t
         val io = IO(new Bundle {
             // Fetch Unit Port
             val FetchUnit = Decoupled(new RequestorFetchUnitPort(inMaxID, outMaxID, params))
+            val first = Output(Bool())
             //val done = Output(Bool())
             //val FetchReq = Decoupled(Output(new TLBundleA(tlInParams)))
             //val isBaseRequest = Output(Bool())
@@ -224,6 +225,7 @@ class RequestorRME(params: RelMemParams, tlInEdge : TLEdge, tlOutEdge: TLEdge, t
         io.FetchUnit.bits := outQueue.io.deq.bits
         io.FetchUnit.valid := outQueue.io.deq.valid
         outQueue.io.deq.ready := io.FetchUnit.ready
+        io.first := io.FetchUnit.bits.descriptor.requestPlacement === 0.U
         
         //io.agu.doGen.bits := false.B
         //io.agu.doGen.valid := false.B
@@ -413,7 +415,6 @@ class RequestorRME(params: RelMemParams, tlInEdge : TLEdge, tlOutEdge: TLEdge, t
                 nDescriptorsSent := nDescriptorsSent + outQueue.io.enq.fire
 
                 stateReg := Mux(nDescriptorsSent === nDescriptors - 1.U && outQueue.io.enq.fire, idle, stateReg)
-
                 //io.done := c
             }
         }

@@ -21,7 +21,6 @@ case class ControlUnitTrapperPort(tlParams : TLBundleParameters, inMaxID: Int) e
 {
     val baseReqSource = Output(UInt(log2Ceil(inMaxID).W))
     val cacheLine = Output(UInt(512.W))
-    
 }
 
 
@@ -52,6 +51,7 @@ class ControlUnitRME(params: RelMemParams, tlOutEdge: TLEdgeOut, tlCachedEdge: T
         // Two independent response-buffer queries for every config; queries never allocate.
         val PackerAdmission = Flipped(Vec(params.maxConfigs, Vec(2, new PackerAdmissionQuery(inMaxID))))
         val TrapperPort = Decoupled(ControlUnitTrapperPort(tlParams, inMaxID))
+        val PackerRetired = Output(UInt(math.max(1, log2Ceil(params.maxConfigs)).W))
     }).suggestName(s"ctrlrio_$instance")
 
     val packerBanks = params.packerCounts.map { count =>
@@ -125,4 +125,8 @@ class ControlUnitRME(params: RelMemParams, tlOutEdge: TLEdgeOut, tlCachedEdge: T
     io.TrapperPort.bits.baseReqSource := completed.io.out.bits.BaseReqSrc
     io.TrapperPort.bits.cacheLine := completed.io.out.bits.PackedLine
     completed.io.out.ready := io.TrapperPort.ready
+    val packerConfigs = VecInit(params.packerCounts.zipWithIndex.flatMap { case (count, config) =>
+        Seq.fill(count)(config.U(math.max(1, log2Ceil(params.maxConfigs)).W))
+    })
+    io.PackerRetired := packerConfigs(completed.io.chosen)
 }

@@ -379,11 +379,6 @@ class RME(params: RelMemParams)(implicit p: Parameters) extends LazyModule
       }
       
 
-      val packer_backpressure = RegInit(
-        VecInit(Seq.fill(params.maxConfigs)(
-          0.U(log2Ceil(params.nPackersPerConfig(0)).W))
-        )
-      )
 
 
 
@@ -418,22 +413,23 @@ class RME(params: RelMemParams)(implicit p: Parameters) extends LazyModule
       //  SynthesizePrintf("cachedRegionIn.a.fire %d\n", cachedRegionIn.a.bits.source)
       }
       
+
+
+
       
-     // println(s"SourceBits ${cachedRegionIn.a.bits.source.getWidth}")
-      dtu_cached_in_a.bits := cachedRegionIn.a.bits
-      dtu_cached_in_a.valid := cachedRegionIn.a.valid
-      cachedRegionIn.a.ready := dtu_cached_in_a.ready
-      dtu_cached_in_a.ready := trapper.io.TLInA.ready
-      //dtu_cached_region.in(0)._1.a.ready := RegNext(dtu_cached_region.in(0)._1.a.valid) // dtu_cached_in_a.ready
+    dtu_cached_in_a.bits  := cachedRegionIn.a.bits
+    dtu_cached_in_a.valid := cachedRegionIn.a.valid
+    cachedRegionIn.a.ready := dtu_cached_in_a.ready
 
-      //when( dtu_cached_region.in(0)._1.a.valid)
-      //{
-      //  SynthesizePrintf(" dtu_cached_region.in(0)._1.a.valid 0x%x\n",  dtu_cached_region.in(0)._1.a.bits.address)
-      //}
+    val trapperArb = Module(new RRArbiter(
+      chiselTypeOf(dtu_cached_in_a.bits), 2
+    ))
 
+    trapperArb.io.in(0) <> dtu_cached_in_a
+    //trapperArb.io.in(1) <> other_cached_in_a
 
-      trapper.io.Config := config
-      trapper.io.TLInA <> dtu_cached_in_a
+    trapper.io.Config := config
+    trapper.io.TLInA <> trapperArb.io.out
 
       cachedRegionIn.d <> trapper.io.TLInD
 
@@ -546,10 +542,26 @@ class RME(params: RelMemParams)(implicit p: Parameters) extends LazyModule
         req.Config := config
       }
 
+
+      val packer_backpressure = RegInit(
+        VecInit(params.packerCounts.map(count =>
+          0.U(math.max(1, log2Ceil(count + 1)).W))
+        )
+      )
+
+
+      packer_backpressure.zipWithIndex.foreach { case (reg, i) =>
+        reg := reg + (requestors(i).FetchUnit.fire && requestors(i).first) - (control_unit.io.PackerRetired === i.U && control_unit.io.TrapperPort.fire)
+      }
+
+
       // Each pipeline arbitrates only its own demand and prefetch descriptors.
       val localRequestArbs = Seq.tabulate(params.maxConfigs) { configIndex =>
         val arb = Module(new RRArbiter(requestors.head.FetchUnit.bits.cloneType, 2))
-        arb.io.in(0) <> requestors(configIndex).FetchUnit
+        val packer_can_accomodate = (packer_backpressure(configIndex) < params.packerCounts(configIndex).U || !requestors(configIndex).first)
+        arb.io.in(0).bits := requestors(configIndex).FetchUnit.bits
+        requestors(configIndex).FetchUnit.ready := arb.io.in(0).ready && packer_can_accomodate
+        arb.io.in(0).valid := requestors(configIndex).FetchUnit.valid && packer_can_accomodate
         arb.io.in(1) <> prefetch_units(configIndex).FetchUnit.ToFetchUnit
         arb
       }
